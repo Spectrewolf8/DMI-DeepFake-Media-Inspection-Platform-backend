@@ -121,7 +121,7 @@ DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL")
 # EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER")
 # EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD")
 
-# Rest Framework
+# Rest Frameworkupload_to
 # https://www.django-rest-framework.org/api-guide/settings/
 REST_FRAMEWORK = {
     # Use Django's standard `django.contrib.auth` permissions,
@@ -138,7 +138,7 @@ REST_FRAMEWORK = {
 
 # Simple JWT settings
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=60),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=1),
     "ROTATE_REFRESH_TOKENS": False,
     "BLACKLIST_AFTER_ROTATION": True,

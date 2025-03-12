@@ -1,4 +1,7 @@
+import hashlib
 import os
+import shutil
+import sys
 import time
 from django.conf import settings
 from django.core.files.storage import FileSystemStorage
@@ -10,19 +13,71 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser, FileUploadParser
 from rest_framework_simplejwt.exceptions import TokenError
 
+from app.contollers.AIGeneratedTextDetectionController import TextDetectionPipeline
 from app.contollers.ResponseCodesController import get_response_code
 from app.contollers.DeepfakeDetectionController import DeepfakeDetectionPipeline
 from app.contollers.AIGeneratedMediaDetectionController import AIGeneratedMediaDetectionPipeline
 from app.contollers.MetadataAnalysisController import MetadataAnalysisPipeline
-from app.contollers.HelpersController import URLHelper
-from api.models import UserData, MediaUpload, DeepfakeDetectionResult, AIGeneratedMediaResult
+from app.contollers.HelpersController import URLHelper, HuggingFaceHelper
+
+from api.models import (
+    AIGeneratedTextResult,
+    MediaUploadMetadata,
+    TextSubmission,
+    UserData,
+    MediaUpload,
+    DeepfakeDetectionResult,
+    AIGeneratedMediaResult,
+)
 from api.serializers import FileUploadSerializer
+
+
+# # Add the project root directory to Python path
+# project_root = os.path.abspath(os.path.join(os.getcwd(), ".."))
+# if project_root not in sys.path:
+#     sys.path.append(project_root)
+
+# import the helper
+# from Hugging_face_helper.helper.main import HuggingFaceHelper
+# Try absolute import
+
+# Initialize HuggingFace Helper
+print("Initializing HuggingFace Helper...")
+hf_helper = HuggingFaceHelper(
+    token=os.environ.get("HF_TOKEN"),
+    repo_name="spectrewolf8/DMI_FYP_Models_Repo",
+    repo_local_dir=f"../../hf_helper_files/repo/",
+    cache_dir=f"../../hf_helper/cache/",
+)
+
+# Get model files if they don't exist locally
+MODEL_FILES = {
+    "deepfake_frames_detection_model": "V3_FRAMES_deepfake_detector_resnext101_64x4d_acc99.33_epochs25.pth",
+    "deepfake_crops_detection_model": "V3_CROPS_deepfake_detector_resnext101_32x8d_acc98.71_epochs25.pth",
+    "ai_gen_media_detection_model": "V3_AI_image_detector_resnext101_32x8d_acc98.30_epochs25.pth",
+    "ai_gen_text_detection_model": "AIGT_bert_epoch3.ipynb.pth",
+}
+
+# Download models if they don't exist
+for model_name, filename in MODEL_FILES.items():
+    local_path = os.path.join(settings.ML_MODELS_DIR, filename)
+    if not os.path.exists(local_path):
+        print(f"Downloading {model_name}...")
+        downloaded_path = hf_helper.download_model(filename)
+        # Create ML_MODELS_DIR if it doesn't exist
+        os.makedirs(settings.ML_MODELS_DIR, exist_ok=True)
+        print(f"Moving {filename} to {local_path}")
+        # Copy from cache to models directory
+        shutil.copy2(downloaded_path, local_path)
+        print(f"{model_name} downloaded successfully")
+    else:
+        print(f"{model_name} already exists locally")
 
 # Initialize DeepfakeDetectionPipeline
 print("Initializing DeepfakeDetectionPipeline...")
 deepfake_detection_pipeline = DeepfakeDetectionPipeline(
-    frame_model_path=f"{settings.ML_MODELS_DIR}/acc99.76_test-2.1_FRAMES_deepfake_detector_resnext50.pth",
-    crop_model_path=f"{settings.ML_MODELS_DIR}/acc99.53_test-2.1_CROPS_deepfake_detector_resnext50.pth",
+    frame_model_path=f"{settings.ML_MODELS_DIR}/{MODEL_FILES['deepfake_frames_detection_model']}",
+    crop_model_path=f"{settings.ML_MODELS_DIR}/{MODEL_FILES['deepfake_crops_detection_model']}",
     frames_dir=f"{settings.MEDIA_ROOT}/temp/temp_frames/",
     crops_dir=f"{settings.MEDIA_ROOT}/temp/temp_crops/",
     threshold=0.4,
@@ -34,7 +89,7 @@ print("DeepfakeDetectionPipeline initialized")
 # Initialize AIGeneratedMediaDetection
 print("Initializing AIGeneratedMediaDetection...")
 ai_generated_media_detection_pipeline = AIGeneratedMediaDetectionPipeline(
-    model_path=f"{settings.ML_MODELS_DIR}/acc98.30_test-2.1_AI_image_detector_resnext101_32x8d.pth",
+    model_path=f"{settings.ML_MODELS_DIR}/{MODEL_FILES['ai_gen_media_detection_model']}",
     synthetic_media_dir=f"{settings.MEDIA_ROOT}/temp/temp_synthetic_media/",
     threshold=0.5,
     log_level=0,
@@ -46,6 +101,15 @@ print("AIGeneratedMediaDetection initialized")
 print("Initializing MetadataAnalysisPipeline...")
 metadata_analysis_pipeline = MetadataAnalysisPipeline()
 print("MetadataAnalysisPipeline initialized")
+
+# Initialize TextDetectionPipeline
+print("Initializing TextDetectionPipeline...")
+text_detection_pipeline = TextDetectionPipeline(
+    model_path=f"{settings.ML_MODELS_DIR}/{MODEL_FILES['ai_gen_text_detection_model']}",
+    threshold=0.4,
+    log_level=0,
+)
+print("TextDetectionPipeline initialized")
 
 
 @api_view(["POST"])
@@ -60,6 +124,7 @@ def process_deepfake_media(request):
             media_file = validated_data["file"]
             user = request.user
             original_filename = media_file.name
+
             # Save file
             fs = FileSystemStorage(location=f"{settings.MEDIA_ROOT}/submissions/")
             filename = fs.save(
@@ -72,16 +137,26 @@ def process_deepfake_media(request):
                 user=UserData.objects.get(user=user),
                 file=file_path,
                 original_filename=original_filename,
-                file_identifier=filename,
+                submission_identifier=filename,  # filename becomes the submission identifier
                 file_type=deepfake_detection_pipeline.media_processor.check_media_type(file_path),
+                purpose="Deepfake-Analysis",
             )
-            print(f"file path: {file_path}")
+
             metatdata = metadata_analysis_pipeline.extract_metadata(file_path)
+            # Save metadata
+            MediaUploadMetadata.objects.create(media_upload=media_upload, metadata=metatdata)
+
             # Process media
             results = deepfake_detection_pipeline.process_media(
                 media_path=file_path,
                 frame_rate=2,
             )
+
+            # Generate file identifier using media processor
+            file_identifier = deepfake_detection_pipeline.media_processor.generate_combined_hash(
+                file_path
+            )
+
             if results is not False:
                 deepfake_result = DeepfakeDetectionResult.objects.create(
                     media_upload=media_upload,
@@ -99,12 +174,20 @@ def process_deepfake_media(request):
                     confidence_score=0.0,
                     frames_analyzed=0,
                     fake_frames=0,
-                    analysis_report={"final_verdict": "Media contains no person."},
+                    analysis_report={
+                        "final_verdict": "MEDIA_CONTAINS_NO_FACES",
+                        "file_identifier": file_identifier,
+                    },
                 )
                 satus_code = "MEDIA_CONTAINS_NO_FACES"
 
+            # Add the file identifier to the media upload
+            media_upload.file_identifier = file_identifier
+            media_upload.save()
+
             result_data = {
                 "id": deepfake_result.id,
+                "submission_identifier": media_upload.submission_identifier,
                 "media_upload": deepfake_result.media_upload.id,
                 "is_deepfake": deepfake_result.is_deepfake,
                 "confidence_score": deepfake_result.confidence_score,
@@ -164,10 +247,14 @@ def process_ai_generated_media(request):
                 user=UserData.objects.get(user=user),
                 file=file_path,
                 original_filename=original_filename,
-                file_identifier=filename,
+                submission_identifier=filename,  # filename becomes the submission identifier
                 file_type="image",  # AI generated media only supports images
+                purpose="AI-Generated-Media-Analysis",
             )
             metatdata = metadata_analysis_pipeline.extract_metadata(file_path)
+            # Save metadata
+            MediaUploadMetadata.objects.create(media_upload=media_upload, metadata=metatdata)
+
             # Process media
             results = ai_generated_media_detection_pipeline.process_image(file_path)
 
@@ -178,13 +265,17 @@ def process_ai_generated_media(request):
                 is_generated=is_generated,
                 confidence_score=results["confidence"],
                 analysis_report={
-                    "file_id": results["file_id"],
+                    "file_identifier": results["file_identifier"],
                     "media_path": results["media_path"],
                     "gradcam_path": results["gradcam_path"],
                     "prediction": results["prediction"],
                     "confidence": results["confidence"],
                 },
             )
+
+            # Add the file identifier to the media upload
+            media_upload.file_identifier = results["file_identifier"]
+            media_upload.save()
 
             result_data = {
                 "id": ai_generated_result.id,
@@ -224,8 +315,8 @@ def process_ai_generated_media(request):
 @permission_classes([IsAuthenticated])
 @parser_classes([MultiPartParser, FormParser, FileUploadParser])
 def process_metadata(request):
-    file_identfier = request.data.get("file_identifier")
-    if not file_identfier:
+    submission_identifier = request.data.get("submission_identifier")
+    if not submission_identifier:
         return JsonResponse(
             {**get_response_code("FILE_IDENTIFIER_REQUIRED"), "error": "File identifier is required."},
             status=status.HTTP_400_BAD_REQUEST,
@@ -233,7 +324,7 @@ def process_metadata(request):
 
     try:
         # Direct path construction instead of searching through all files
-        file_path = os.path.join(f"{settings.MEDIA_ROOT}/submissions/", file_identfier)
+        file_path = os.path.join(f"{settings.MEDIA_ROOT}/submissions/", submission_identifier)
 
         if not os.path.exists(file_path):
             return JsonResponse(
@@ -254,83 +345,85 @@ def process_metadata(request):
         )
 
 
-@api_view(["GET"])
+@api_view(["POST"])
 @permission_classes([IsAuthenticated])
-def get_user_submissions_history(request):
+def process_ai_generated_text(request):
+    """
+    API endpoint to detect if text is human or AI-generated
+    """
     try:
+        # Validate input
+        if not request.data or "text" not in request.data:
+            return JsonResponse(
+                {**get_response_code("TEXT_MISSING"), "error": "Text parameter missing"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if "highlight" not in request.data:
+            return JsonResponse(
+                {**get_response_code("HIGHLIGHT_MISSING"), "error": "Highlight parameter missing"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        text = request.data["text"]
+        highlight = request.data.get("highlight")
         user = request.user
-        user_data = UserData.objects.get(user=user)
-        user_submissions = MediaUpload.objects.filter(user=user_data)
 
-        # Organize submissions by type
-        categorized_history = {
-            "deepfake_analysis": [],
-            "ai_generated_analysis": [],
-            "dual_analysis": [],  # Files analyzed by both methods
-            "incomplete_analysis": [],  # Files with no analysis results
+        if len(text.strip()) < 50:  # Minimum text length for reliable analysis : 50 characters
+            return JsonResponse(
+                {
+                    **get_response_code("TEXT_TOO_SHORT"),
+                    "error": "Text is too short for reliable analysis",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Generate a submission identifier
+        text_hash = hashlib.md5(text.encode()).hexdigest()[:16]
+        submission_identifier = f"uid{user.id}-{time.strftime('%Y-%m-%d_%H-%M-%S')}-{text_hash}"
+
+        # Save text submission
+        text_submission = TextSubmission.objects.create(
+            user=UserData.objects.get(user=user),
+            text_content=text,
+            submission_identifier=submission_identifier,
+            purpose="AI-Text-Analysis",
+        )
+
+        print(highlight)
+        # Process the text
+        results = text_detection_pipeline.process_text(text, highlight=highlight)
+
+        # Determine if it's AI-generated (anything not classified as "Human")
+        is_ai_generated = results["prediction"] != "Human"
+
+        # Save detection results
+        text_detection_result = AIGeneratedTextResult.objects.create(
+            text_submission=text_submission,
+            is_ai_generated=is_ai_generated,
+            source_prediction=results["prediction"],
+            confidence_scores=results["confidence"],
+            highlighted_text=results.get("highlighted_text", ""),
+            html_text=results.get("html_text", ""),
+        )
+
+        # Prepare response data
+        result_data = {
+            "submission_identifier": submission_identifier,
+            "is_ai_generated": text_detection_result.is_ai_generated,
+            "source_prediction": text_detection_result.source_prediction,
+            "confidence_scores": text_detection_result.confidence_scores,
+            "highlighted_text": text_detection_result.highlighted_text if highlight else None,
+            "html_text": text_detection_result.html_text if highlight else None,
         }
 
-        for submission in user_submissions:
-            base_entry = {
-                "id": submission.id,
-                "file": URLHelper.convert_to_public_url(file_path=submission.file.path),
-                "original_filename": submission.original_filename,
-                "file_type": submission.file_type,
-                "upload_date": submission.upload_date,
-            }
-
-            df_entry = DeepfakeDetectionResult.objects.filter(media_upload_id=submission.id)
-            ai_entry = AIGeneratedMediaResult.objects.filter(media_upload_id=submission.id)
-
-            has_df = df_entry.exists()
-            has_ai = ai_entry.exists()
-
-            if has_df:
-                base_entry["deepfake_detection"] = {
-                    "is_deepfake": df_entry[0].is_deepfake,
-                    "confidence_score": df_entry[0].confidence_score,
-                    "frames_analyzed": df_entry[0].frames_analyzed,
-                    "fake_frames": df_entry[0].fake_frames,
-                    "analysis_report": df_entry[0].analysis_report,
-                }
-
-            if has_ai:
-                base_entry["ai_generated_media"] = {
-                    "is_generated": ai_entry[0].is_generated,
-                    "confidence_score": ai_entry[0].confidence_score,
-                    "analysis_report": ai_entry[0].analysis_report,
-                }
-
-            # Categorize based on analysis type
-            if has_df and has_ai:
-                categorized_history["dual_analysis"].append(base_entry)
-            elif has_df:
-                categorized_history["deepfake_analysis"].append(base_entry)
-            elif has_ai:
-                categorized_history["ai_generated_analysis"].append(base_entry)
-            else:
-                categorized_history["incomplete_analysis"].append(base_entry)
-
-        # Add summary statistics
-        summary = {
-            "total_submissions": len(user_submissions),
-            "deepfake_only_count": len(categorized_history["deepfake_analysis"]),
-            "ai_generated_only_count": len(categorized_history["ai_generated_analysis"]),
-            "dual_analysis_count": len(categorized_history["dual_analysis"]),
-            "incomplete_analysis_count": len(categorized_history["incomplete_analysis"]),
-        }
-
+        # Return the analysis results
         return JsonResponse(
-            {**get_response_code("SUCCESS"), "summary": summary, "data": categorized_history},
-            status=status.HTTP_200_OK,
+            {**get_response_code("SUCCESS"), "data": result_data}, status=status.HTTP_200_OK
         )
-    except UserData.DoesNotExist:
-        return JsonResponse(
-            {**get_response_code("USER_DATA_NOT_FOUND"), "error": "User data not found."},
-            status=status.HTTP_404_NOT_FOUND,
-        )
+
     except Exception as e:
         return JsonResponse(
-            {**get_response_code("HISTORY_FETCH_ERROR"), "error": str(e)},
+            {**get_response_code("TEXT_PROCESSING_ERROR"), "error": str(e)},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )

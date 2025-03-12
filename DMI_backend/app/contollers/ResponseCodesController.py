@@ -1,19 +1,18 @@
 # Success Codes
 SUCCESS_CODES = {
-    "SUCCESS": {"code": "S01", "message": "Request was successful."},
-    "PASSWORD_CHANGE_SUCCESS": {"code": "S02", "message": "Password changed successfully."},
-    "EMAIL_CHANGE_SUCCESS": {"code": "S03", "message": "Email changed successfully."},
-    "FILE_UPLOAD_SUCCESS": {"code": "S04", "message": "File uploaded successfully."},
-    "USER_CREATION_SUCCESS": {"code": "S05", "message": "User created successfully."},
-    "LOGOUT_SUCCESS": {"code": "S06", "message": "Successfully logged out."},
+    "SUCCESS": {"code": "S01", "message": "Success"},
+    "LOGIN_SUCCESS": {"code": "S02", "message": "Login successful."},
+    "LOGOUT_SUCCESS": {"code": "S03", "message": "Logout successful."},
+    "PASSWORD_CHANGE_SUCCESS": {"code": "S04", "message": "Password changed successfully."},
+    "EMAIL_CHANGE_SUCCESS": {"code": "S05", "message": "Email changed successfully."},
 }
 
 # Authentication Error Codes
 AUTH_ERROR_CODES = {
-    "INVALID_CREDENTIALS": {"code": "E01", "message": "Invalid credentials."},
-    "TOKEN_INVALID_OR_EXPIRED": {"code": "E02", "message": "Token is invalid or expired."},
-    "REFRESH_TOKEN_REQUIRED": {"code": "E03", "message": "Refresh token is required."},
-    "REFRESH_TOKEN_INVALID": {"code": "E18", "message": "Invalid refresh token."},
+    "TOKEN_INVALID_OR_EXPIRED": {"code": "E01", "message": "Invalid or expired token."},
+    "LOGIN_REQUIRED": {"code": "E02", "message": "Login required."},
+    "INVALID_CREDENTIALS": {"code": "E03", "message": "Invalid credentials."},
+    "ACCESS_DENIED": {"code": "E18", "message": "You don't have permission to access this resource."},
 }
 
 # User and Account Error Codes
@@ -40,17 +39,40 @@ FILE_MEDIA_ERROR_CODES = {
     "MEDIA_PROCESSING_ERROR": {"code": "E09", "message": "Error processing media file."},
     "FILE_IDENTIFIER_REQUIRED": {"code": "E22", "message": "File identifier is required."},
     "METADATA_ANALYSIS_ERROR": {"code": "E23", "message": "Error analyzing metadata."},
+    "DELETE_ERROR": {"code": "E26", "message": "Error deleting submission."},
+    "UNSUPPORTED_FILE_TYPE": {"code": "E28", "message": "This file type is not supported."},
 }
 
-# New Error Code for history fetch issues
-NEW_ERROR_CODES = {
+# History and Submission Error Codes
+HISTORY_ERROR_CODES = {
     "HISTORY_FETCH_ERROR": {"code": "E24", "message": "Error fetching submission history."},
+    "HISTORY_DELETE_ERROR": {"code": "E25", "message": "Error deleting submission history."},
+    "SUBMISSION_FETCH_ERROR": {"code": "E27", "message": "Error fetching submission details."},
+    "SUBMISSION_NOT_FOUND": {"code": "E29", "message": "The specified submission was not found."},
+    "INVALID_SUBMISSION": {"code": "E30", "message": "The submission is invalid or incomplete."},
+    "DUPLICATE_SUBMISSION": {"code": "E31", "message": "This content has already been submitted."},
+}
+
+# General Error Codes
+GENERAL_ERROR_CODES = {
+    "INVALID_REQUEST": {"code": "G01", "message": "Invalid request parameters."},
+    "SERVER_ERROR": {"code": "G02", "message": "An unexpected server error occurred."},
+    "NOT_FOUND": {"code": "G03", "message": "The requested resource was not found."},
+    "INVALID_CATEGORY": {"code": "G04", "message": "Invalid category selected."},
 }
 
 # User Submission Specific Error Codes
 USER_SUBMISSION_ERROR_CODES = {
     "MEDIA_CONTAINS_NO_FACES": {"code": "USE01", "message": "Media file contains no faces."},
     "FILE_NOT_FOUND": {"code": "USE02", "message": "File not found."},
+}
+
+# AI Text Analysis Error Codes
+AI_TEXT_ERROR_CODES = {
+    "TEXT_MISSING": {"code": "ATE01", "message": "No text provided for analysis."},
+    "TEXT_PROCESSING_ERROR": {"code": "ATE02", "message": "Error processing text for AI analysis."},
+    "TEXT_TOO_SHORT": {"code": "ATE03", "message": "Provided text is too short for reliable analysis."},
+    "HIGHLIGHT_MISSING": {"code": "ATE04", "message": "No highlight parameter provided."},
 }
 
 # Combine all response codes into one dictionary for lookup
@@ -60,9 +82,21 @@ RESPONSE_CODES = {
     **USER_ACCOUNT_ERROR_CODES,
     **FILE_MEDIA_ERROR_CODES,
     **USER_SUBMISSION_ERROR_CODES,
-    **NEW_ERROR_CODES,
+    **HISTORY_ERROR_CODES,
+    **AI_TEXT_ERROR_CODES,
+    **GENERAL_ERROR_CODES,
 }
 
 
 def get_response_code(code_key: str) -> dict:
-    return RESPONSE_CODES.get(code_key, {"code": "E00", "message": "Unknown error."})
+    """
+    Get response code by key.
+    Args:
+        code_key (str): Key for response code.
+    Returns:
+        dict: Response code dictionary.
+    """
+    if code_key in RESPONSE_CODES:
+        return RESPONSE_CODES[code_key]
+    else:
+        return {"code": "E999", "message": "Unknown error code."}

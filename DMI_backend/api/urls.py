@@ -1,5 +1,6 @@
 from django.urls import path
-from .views import auth_views, user_views, semantic_views, helper_views
+
+from .views import auth_views, user_views, semantic_views, helper_views, pda_views
 from rest_framework_simplejwt.views import TokenRefreshView
 
 urlpatterns = [
@@ -17,13 +18,29 @@ urlpatterns = [
     path("user/info/", user_views.get_user_info, name="get_user_info"),
     path(
         "user/submissions/",
-        user_views.get_user_submissions_history,
-        name="get_user_submissions_history",
+        user_views.manage_submission_history,
+        name="manage_submission_history",
+    ),
+    path(
+        "user/submissions/<str:submission_identifier>/",
+        user_views.manage_submission,
+        name="manage_submission",
     ),
     # media processing endpoints
     path("process/df/", semantic_views.process_deepfake_media, name="process_deepfake"),
     path("process/ai/", semantic_views.process_ai_generated_media, name="process_ai_generated_media"),
     path("process/metadata/", semantic_views.process_metadata, name="process_metadata"),
+    # public deepfake archive endpoints
+    path("pda/search/", pda_views.browse_pda, name="browse_pda"),
+    path(
+        "pda/details/<str:submission_identifier>/",
+        pda_views.get_pda_submission_detail,  # Updated function name
+        name="get_pda_submission_detail",
+    ),
+    # path("pda/submit_direct/", pda_views.submit_to_pda, name="submit_to_pda"), # Deprecated for now
+    path("pda/submit/", pda_views.submit_existing_to_pda, name="submit_existing_to_pda"),
+    # text processing endpoints
+    path("process/text/", semantic_views.process_ai_generated_text, name="process_ai_genearated_text"),
     # response codes endpoint
     path("docs/response_codes/", helper_views.get_response_codes, name="get_response_codes"),
 ]

@@ -113,8 +113,7 @@ class FacialWatchAndRecognitionPipleine:
             return True
 
         except Exception as e:
-            if self.log_level >= 1:
-                print(f"Error registering user face: {e}")
+            print(f"Error registering user face: {e}")
             return False
 
     def check_face_exists(self, image_path: str, requesting_user_id: int = None) -> dict:
@@ -179,8 +178,7 @@ class FacialWatchAndRecognitionPipleine:
             return {"exists": False}
 
         except Exception as e:
-            if self.log_level >= 1:
-                print(f"Error checking face existence: {e}")
+            print(f"Error checking face existence: {e}")
             return {"exists": False}
 
     def check_uploaded_image(self, image_path: str) -> list:
@@ -261,11 +259,10 @@ class FacialWatchAndRecognitionPipleine:
             return matches
 
         except Exception as e:
-            if self.log_level >= 1:
-                print(f"Error checking uploaded image: {e}")
+            print(f"Error checking uploaded image: {e}")
             return []
 
-    def notify_matched_users(self, matches: list, image_upload_id: int) -> None:
+    def notify_matched_users(self, matches: list, pda_submission) -> None:
         """
         Notify users that their face has been detected in an upload.
 
@@ -281,7 +278,8 @@ class FacialWatchAndRecognitionPipleine:
                 # Log the match in the database
                 facial_match = FacialWatchMatch(
                     user=user_data,
-                    media_upload_id=image_upload_id,
+                    pda_submission=pda_submission,
+                    pda_submission_identifier=pda_submission.submission_identifier,
                     match_confidence=match["similarity"],
                     face_location=match["bbox"],
                     notification_sent=True,
@@ -291,7 +289,7 @@ class FacialWatchAndRecognitionPipleine:
                 # Send email notification
                 send_mail(
                     subject="Your face was detected in an uploaded image",
-                    message=f"Hello {user_data.user.username},\n\nYour face was detected in an image uploaded to our platform. The submission ID is: {image_upload_id}. You are receiving this notification because you registered for our Facial Watch service.",
+                    message=f"Hello {user_data.user.username},\n\nYour face was detected in an image uploaded to our platform. The PDA submission ID is: {pda_submission.submission_identifier}. You are receiving this notification because you registered for our Facial Watch service.",
                     from_email=settings.DEFAULT_FROM_EMAIL,
                     recipient_list=[user_data.user.email],
                     fail_silently=False,
@@ -301,8 +299,7 @@ class FacialWatchAndRecognitionPipleine:
                     print(f"Notification sent to user {user_id}")
 
             except Exception as e:
-                if self.log_level >= 1:
-                    print(f"Error sending notification to user {user_id}: {e}")
+                print(f"Error sending notification to user {user_id}: {e}")
 
     def remove_user_registration(self, user_id: int) -> bool:
         """
@@ -355,6 +352,5 @@ class FacialWatchAndRecognitionPipleine:
                 return False
 
         except Exception as e:
-            if self.log_level >= 1:
-                print(f"Error removing user registration: {e}")
+            print(f"Error removing user registration: {e}")
             return False

@@ -11,11 +11,13 @@ from rest_framework.decorators import api_view, permission_classes, parser_class
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.parsers import MultiPartParser, FormParser, FileUploadParser
 
-from app.contollers.DeepfakeDetectionController import DeepfakeDetectionPipeline
-from app.contollers.MetadataAnalysisController import MetadataAnalysisPipeline
-from app.contollers.ResponseCodesController import get_response_code
-from app.contollers.HelpersController import URLHelper
+from app.controllers.DeepfakeDetectionController import DeepfakeDetectionPipeline
+from app.controllers.MetadataAnalysisController import MetadataAnalysisPipeline
+from app.controllers.ResponseCodesController import get_response_code
+from app.controllers.HelpersController import URLHelper
+from app.controllers.FacialWatchAndRecognitionController import FacialWatchAndRecognitionPipleine
 
+# Initialize facial watch system (add this near top of file with other initializations)
 from api.models import (
     UserData,
     DeepfakeDetectionResult,
@@ -29,6 +31,8 @@ from api.serializers import FileUploadSerializer
 # This should be initialized alongside other controllers in semantic_views.py
 # and imported here to avoid duplication
 from api.views.semantic_views import deepfake_detection_pipeline, metadata_analysis_pipeline
+
+facial_watch_system = FacialWatchAndRecognitionPipleine(recognition_threshold=0.3, log_level=1)
 
 
 @api_view(["POST"])
@@ -98,7 +102,10 @@ def submit_to_pda(request):
                 submission_identifier=submission_identifier,
                 is_approved=False,  # Requires moderation by default
             )
-
+            matches = facial_watch_system.check_uploaded_image(file_path)
+            if matches:
+                # Notify matched users - note we're passing pda_submission.id instead of media_upload.id
+                facial_watch_system.notify_matched_users(matches, pda_submission.id)
             # Extract metadata and analyze for deepfakes
             metadata = metadata_analysis_pipeline.extract_metadata(file_path)
 
@@ -261,7 +268,10 @@ def submit_existing_to_pda(request):
                     {
                         **get_response_code("DUPLICATE_SUBMISSION"),
                         "error": "This media has already been submitted to the PDA.",
-                        "data": {"pda_submission_identifier": existing_pda.submission_identifier},
+                        "data": {
+                            "submission_identifier": submission_identifier,
+                            "pda_submission_identifier": existing_pda.submission_identifier,
+                        },
                     },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
@@ -305,8 +315,8 @@ def submit_existing_to_pda(request):
                 {
                     **get_response_code("SUCCESS"),
                     "data": {
-                        "submission_id": pda_submission.id,
-                        "submission_identifier": pda_submission.submission_identifier,
+                        "submission_identifier": submission_identifier,
+                        "pda_submission_identifier": pda_submission.submission_identifier,
                         "status": "Under review" if not pda_submission.is_approved else "Approved",
                     },
                 },
@@ -372,11 +382,11 @@ def browse_pda(request):
             detection_result = submission.detection_result
 
             result_data = {
-                "id": submission.id,
                 "title": submission.title,
                 "category": submission.category,
                 "category_display": submission.get_category_display(),
-                "submission_identifier": submission.submission_identifier,
+                "submission_identifier": submission.submission_identifier.replace("pda-", ""),
+                "pda_submission_identifier": submission.submission_identifier,
                 "description": submission.description,
                 "context": submission.context,
                 "source_url": submission.source_url,
@@ -422,7 +432,7 @@ def browse_pda(request):
 @permission_classes([AllowAny])
 def get_pda_submission_detail(request, submission_identifier):
     """
-    Get detailed information about a specific PDA submission
+    Get detailed information about a specific PDA submission including detection results and metadata
     """
     try:
         # Get submission directly instead of using controller
@@ -440,25 +450,41 @@ def get_pda_submission_detail(request, submission_identifier):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        # Check if this was submitted from an existing MediaUpload
-        original_submission_identifier = None
-        if submission.submission_identifier.startswith("pda-"):
-            # Extract the original submission identifier by removing the "pda-" prefix
-            original_submission_identifier = submission.submission_identifier[4:]
+        # Get detection result and metadata
+        detection_result = submission.detection_result
+        try:
+            metadata = MediaUploadMetadata.objects.get(
+                media_upload__submission_identifier=submission.submission_identifier.replace("pda-", "")
+            ).metadata
+        except MediaUploadMetadata.DoesNotExist:
+            metadata = {}
 
         result_data = {
             "id": submission.id,
             "title": submission.title,
             "category": submission.category,
             "category_display": submission.get_category_display(),
-            "submission_identifier": submission.submission_identifier,
-            "original_submission_identifier": original_submission_identifier,
+            "submission_identifier": submission.submission_identifier.replace("pda-", ""),
+            "pda_submission_identifier": submission.submission_identifier,
             "description": submission.description,
             "context": submission.context,
             "source_url": submission.source_url,
             "file_type": submission.file_type,
             "submission_date": submission.submission_date,
             "file_url": URLHelper.convert_to_public_url(file_path=submission.file.path),
+            "detection_result": (
+                {
+                    "is_deepfake": detection_result.is_deepfake,
+                    "confidence_score": detection_result.confidence_score,
+                    "frames_analyzed": detection_result.frames_analyzed,
+                    "fake_frames": detection_result.fake_frames,
+                    "analysis_date": detection_result.analysis_date,
+                    "analysis_report": detection_result.analysis_report,
+                }
+                if detection_result
+                else None
+            ),
+            "metadata": metadata,
         }
 
         return JsonResponse(

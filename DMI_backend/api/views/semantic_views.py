@@ -13,12 +13,13 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser, FileUploadParser
 from rest_framework_simplejwt.exceptions import TokenError
 
-from app.contollers.AIGeneratedTextDetectionController import TextDetectionPipeline
-from app.contollers.ResponseCodesController import get_response_code
-from app.contollers.DeepfakeDetectionController import DeepfakeDetectionPipeline
-from app.contollers.AIGeneratedMediaDetectionController import AIGeneratedMediaDetectionPipeline
-from app.contollers.MetadataAnalysisController import MetadataAnalysisPipeline
-from app.contollers.HelpersController import URLHelper, HuggingFaceHelper
+from app.controllers.FacialWatchAndRecognitionController import FacialWatchAndRecognitionPipleine
+from app.controllers.AIGeneratedTextDetectionController import TextDetectionPipeline
+from app.controllers.ResponseCodesController import get_response_code
+from app.controllers.DeepfakeDetectionController import DeepfakeDetectionPipeline
+from app.controllers.AIGeneratedMediaDetectionController import AIGeneratedMediaDetectionPipeline
+from app.controllers.MetadataAnalysisController import MetadataAnalysisPipeline
+from app.controllers.HelpersController import URLHelper, HuggingFaceHelper
 
 from api.models import (
     AIGeneratedTextResult,
@@ -48,6 +49,8 @@ hf_helper = HuggingFaceHelper(
     repo_name="spectrewolf8/DMI_FYP_Models_Repo",
     repo_local_dir=f"../../hf_helper_files/repo/",
     cache_dir=f"../../hf_helper/cache/",
+    offline_mode=os.environ.get("HF_OFFLINE_MODE", "False").lower() == "true",
+    check_updates_interval=24 * 3600,  # Check for updates once per day
 )
 
 # Get model files if they don't exist locally
@@ -57,6 +60,8 @@ MODEL_FILES = {
     "ai_gen_media_detection_model": "V3_AI_image_detector_resnext101_32x8d_acc98.30_epochs25.pth",
     "ai_gen_text_detection_model": "AIGT_bert_epoch3.ipynb.pth",
 }
+
+facial_watch_system = FacialWatchAndRecognitionPipleine(recognition_threshold=0.3, log_level=1)
 
 # Download models if they don't exist
 for model_name, filename in MODEL_FILES.items():
@@ -141,7 +146,7 @@ def process_deepfake_media(request):
                 file_type=deepfake_detection_pipeline.media_processor.check_media_type(file_path),
                 purpose="Deepfake-Analysis",
             )
-
+            
             metatdata = metadata_analysis_pipeline.extract_metadata(file_path)
             # Save metadata
             MediaUploadMetadata.objects.create(media_upload=media_upload, metadata=metatdata)

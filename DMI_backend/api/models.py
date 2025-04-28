@@ -99,12 +99,45 @@ class PublicDeepfakeArchive(models.Model):
     category = models.CharField(max_length=3, choices=DEEPFAKE_CATEGORIES)
     context = models.TextField(blank=True, null=True, max_length=256)
     source_url = models.URLField(blank=True, null=True)
-    detection_result = models.ForeignKey(DeepfakeDetectionResult, on_delete=models.SET_NULL, null=True)
+    detection_result = models.OneToOneField(
+        DeepfakeDetectionResult, on_delete=models.CASCADE, null=False, related_name="archive_submission"
+    )
     is_approved = models.BooleanField(default=False)  # For moderation purposes
     submission_date = models.DateTimeField(default=timezone.now)
+    reviewed_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name="reviewed_submissions"
+    )
+    review_date = models.DateTimeField(null=True, blank=True)
+    review_notes = models.TextField(blank=True)
 
-    def __str__(self):
+    def save(self, *args, **kwargs):
+        if self.is_approved and not self.review_date:
+            self.review_date = timezone.now()
+        super().save(*args, **kwargs)
+
+    def __str__(self):                                      
         return f"{self.title} - {self.submission_date}"
+
+
+class FacialWatchRegistration(models.Model):
+    user = models.ForeignKey(UserData, on_delete=models.CASCADE)
+    face_embedding = models.JSONField()  # Store face embedding vectors as JSON
+    registration_date = models.DateTimeField(auto_now_add=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['user', 'is_active']),
+        ]
+
+
+class FacialWatchMatch(models.Model):
+    user = models.ForeignKey(UserData, on_delete=models.CASCADE)
+    media_upload = models.ForeignKey(MediaUpload, on_delete=models.SET_NULL, null=True)
+    match_confidence = models.FloatField()
+    face_location = models.JSONField(null=True)  # Store bounding box coordinates
+    match_date = models.DateTimeField(auto_now_add=True)
+    notification_sent = models.BooleanField(default=False)
 
 
 # class CommunityFeedback(models.Model):

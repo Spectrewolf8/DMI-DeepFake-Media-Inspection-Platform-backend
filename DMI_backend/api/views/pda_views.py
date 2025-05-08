@@ -16,6 +16,7 @@ from app.controllers.MetadataAnalysisController import MetadataAnalysisPipeline
 from app.controllers.ResponseCodesController import get_response_code
 from app.controllers.HelpersController import URLHelper
 from app.controllers.FacialWatchAndRecognitionController import FacialWatchAndRecognitionPipleine
+from api.models import PDASubmissionProfiledFace
 
 # Initialize facial watch system (add this near top of file with other initializations)
 from api.models import (
@@ -32,7 +33,7 @@ from api.serializers import FileUploadSerializer
 # and imported here to avoid duplication
 from api.views.semantic_views import deepfake_detection_pipeline, metadata_analysis_pipeline
 
-facial_watch_system = FacialWatchAndRecognitionPipleine(recognition_threshold=0.3, log_level=0)
+facial_watch_system = FacialWatchAndRecognitionPipleine(recognition_threshold=0.3, log_level=1)
 
 
 @api_view(["POST"])
@@ -314,7 +315,70 @@ def submit_existing_to_pda(request):
             pda_submission.save()
 
             # Check for registered faces in the copied file
-            matches = facial_watch_system.check_uploaded_image(pda_file_path)
+
+            face_path = pda_file_path  # Default to the original file path
+
+            # For videos, we need to extract a frame with a face first
+            if file_type == "Video":
+                # Create directory for storing frames if needed
+                frames_dir = os.path.join(settings.MEDIA_ROOT, "facial_landmarks_frames")
+                os.makedirs(frames_dir, exist_ok=True)
+
+                # Extract a frame containing a face
+                extracted_frame_path = (
+                    deepfake_detection_pipeline.media_processor.extract_single_frame_with_face(
+                        pda_file_path, frames_dir
+                    )
+                )
+                if extracted_frame_path:
+                    face_path = extracted_frame_path
+                else:
+                    # No faces found in the video
+                    matches = []
+                    face_path = None
+
+            # Process the image or extracted frame
+            if face_path:
+                # Check for registered faces (for notifications)
+                matches = facial_watch_system.check_uploaded_image(face_path)
+
+                # Store face data in the database for future searches
+                try:
+                    # Extract faces and embeddings using DeepFace
+                    from deepface import DeepFace
+
+                    # Extract faces with bounding boxes
+                    extracted_faces = DeepFace.extract_faces(
+                        img_path=face_path,
+                        detector_backend=facial_watch_system.detector_backend,
+                        enforce_detection=False,
+                        align=True,
+                    )
+
+                    # Get embeddings for each face
+                    embeddings = DeepFace.represent(
+                        img_path=face_path,
+                        model_name=facial_watch_system.model_name,
+                        detector_backend=facial_watch_system.detector_backend,
+                        enforce_detection=False,
+                        align=True,
+                    )
+
+                    # Store each detected face in the database
+                    for i, face_data in enumerate(extracted_faces):
+                        if i < len(embeddings):  # Ensure we have an embedding for this face
+
+                            PDASubmissionProfiledFace.objects.create(
+                                pda_submission=pda_submission,
+                                face_embedding=embeddings[i]["embedding"],
+                                face_location=face_data["facial_area"],
+                                frame_id=os.path.basename(face_path) if file_type == "Video" else None,
+                            )
+                except Exception as e:
+                    print(f"Error storing face data: {e}")
+            else:
+                matches = []
+
             if matches:
                 # Notify matched users with the PDA submission ID
                 facial_watch_system.notify_matched_users(matches, pda_submission)
@@ -365,6 +429,15 @@ def browse_pda(request):
         page = int(request.GET.get("page", 1))
         limit = int(request.GET.get("limit", 10))
 
+        # Get current user's data if authenticated
+        user_data_id = None
+        if request.user.is_authenticated:
+            try:
+                user_data = UserData.objects.get(user=request.user)
+                user_data_id = user_data.id
+            except UserData.DoesNotExist:
+                user_data_id = None
+
         # Search PDA submissions directly instead of using controller
         submissions = PublicDeepfakeArchive.objects.filter(is_approved=True)
 
@@ -390,6 +463,9 @@ def browse_pda(request):
         for submission in paginated_submissions:
             detection_result = submission.detection_result
 
+            # Determine if submission is owned by current user
+            user_owned = user_data_id is not None and submission.user.id == user_data_id
+
             result_data = {
                 "title": submission.title,
                 "category": submission.category,
@@ -402,6 +478,7 @@ def browse_pda(request):
                 "file_type": submission.file_type,
                 "submission_date": submission.submission_date,
                 "file_url": URLHelper.convert_to_public_url(file_path=submission.file.path),
+                "user_owned": user_owned,
                 "detection_result": (
                     {
                         "is_deepfake": detection_result.is_deepfake,
@@ -444,6 +521,15 @@ def get_pda_submission_detail(request, submission_identifier):
     Get detailed information about a specific PDA submission including detection results and metadata
     """
     try:
+        # Get current user's data if authenticated
+        user_data_id = None
+        if request.user.is_authenticated:
+            try:
+                user_data = UserData.objects.get(user=request.user)
+                user_data_id = user_data.id
+            except UserData.DoesNotExist:
+                user_data_id = None
+
         # Get submission directly instead of using controller
         try:
             submission = PublicDeepfakeArchive.objects.get(submission_identifier=submission_identifier)
@@ -458,6 +544,9 @@ def get_pda_submission_detail(request, submission_identifier):
                 {**get_response_code("ACCESS_DENIED"), "error": "This submission is under review."},
                 status=status.HTTP_403_FORBIDDEN,
             )
+
+        # Determine if submission is owned by current user
+        user_owned = user_data_id is not None and submission.user.id == user_data_id
 
         # Get detection result and metadata
         detection_result = submission.detection_result
@@ -481,6 +570,7 @@ def get_pda_submission_detail(request, submission_identifier):
             "file_type": submission.file_type,
             "submission_date": submission.submission_date,
             "file_url": URLHelper.convert_to_public_url(file_path=submission.file.path),
+            "user_owned": user_owned,
             "detection_result": (
                 {
                     "is_deepfake": detection_result.is_deepfake,

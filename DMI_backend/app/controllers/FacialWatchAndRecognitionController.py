@@ -1,4 +1,9 @@
 import os
+
+# Force TensorFlow (used by DeepFace) to use CPU only
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "false"
+
 import time
 import numpy as np
 from django.conf import settings
@@ -165,7 +170,7 @@ class FacialWatchAndRecognitionPipleine:
                 similarity = 1 - cosine(upload_embedding, registered_embedding)
                 print(f"Similarity: {similarity}")
                 # Use a stricter threshold for claiming a face already exists
-                duplicate_threshold = 0.85  # Higher value = more strict matching
+                duplicate_threshold = 0.65  # Higher value = more strict matching
 
                 if similarity > duplicate_threshold:
                     return {
@@ -330,12 +335,19 @@ class FacialWatchAndRecognitionPipleine:
                 # Delete registrations
                 registrations.delete()
 
+                # Also delete all match history for this user
+                matches_count = FacialWatchMatch.objects.filter(user_id=user_id).count()
+                FacialWatchMatch.objects.filter(user_id=user_id).delete()
+
+                if self.log_level >= 1:
+                    print(f"Removed {matches_count} facial match records for user {user_id}")
+
                 # Send notification email
                 if user_email:
                     try:
                         send_mail(
                             subject="Face Registration Removed",
-                            message=f"Hello {username},\n\nYour face has been removed from our Facial Watch service. You will no longer receive notifications when your face is detected in uploads.",
+                            message=f"Hello {username},\n\nYour face has been removed from our Facial Watch service. You will no longer receive notifications when your face is detected in uploads. All your previous match history has also been cleared.",
                             from_email=settings.DEFAULT_FROM_EMAIL,
                             recipient_list=[user_email],
                             fail_silently=False,
@@ -354,3 +366,109 @@ class FacialWatchAndRecognitionPipleine:
         except Exception as e:
             print(f"Error removing user registration: {e}")
             return False
+
+    def search_faces_in_pda(self, image_path: str, threshold: float = 0.6) -> dict:
+        """
+        Search for faces in PDA submissions that match the provided image.
+
+        Args:
+            image_path: Path to the image to search with
+            threshold: Similarity threshold (higher = stricter matching)
+
+        Returns:
+            dict: {'success': bool, 'matches': list or None, 'error': str or None}
+        """
+        try:
+            # Extract face embedding from the search image
+            try:
+                # First detect faces
+                extracted_faces = DeepFace.extract_faces(
+                    img_path=image_path,
+                    detector_backend=self.detector_backend,
+                    enforce_detection=True,  # Require at least one face
+                    align=True,
+                )
+
+                if len(extracted_faces) == 0:
+                    return {
+                        "success": False,
+                        "error": "No faces detected in the uploaded image",
+                        "matches": None,
+                    }
+
+                # Get embeddings for the detected face
+                embeddings = DeepFace.represent(
+                    img_path=image_path,
+                    model_name=self.model_name,
+                    detector_backend=self.detector_backend,
+                    enforce_detection=True,
+                    align=True,
+                )
+
+                if not embeddings or len(embeddings) == 0:
+                    return {
+                        "success": False,
+                        "error": "Could not generate facial encoding",
+                        "matches": None,
+                    }
+
+                # We'll use the first face if multiple are detected
+                search_embedding = np.array(embeddings[0]["embedding"])
+
+            except Exception as e:
+                if self.log_level >= 1:
+                    print(f"Error extracting face from search image: {e}")
+                return {
+                    "success": False,
+                    "error": "Error processing the uploaded image",
+                    "matches": None,
+                }
+
+            # Get all PDA face records
+            from api.models import PDASubmissionProfiledFace
+
+            all_pda_faces = PDASubmissionProfiledFace.objects.all()
+
+            if not all_pda_faces.exists():
+                return {"success": True, "matches": [], "error": None}
+
+            # Find matches
+            matches = []
+            seen_pda_ids = set()  # To avoid duplicate submissions
+
+            for face_record in all_pda_faces:
+                # Skip if we already have this PDA submission
+                if face_record.pda_submission.id in seen_pda_ids:
+                    continue
+
+                # Get the stored embedding
+                stored_embedding = np.array(face_record.face_embedding)
+
+                # Calculate similarity
+                similarity = 1 - cosine(search_embedding, stored_embedding)
+
+                # If similar enough, add to matches
+                if similarity >= threshold:
+                    pda = face_record.pda_submission
+
+                    match_data = {
+                        "pda_id": pda.id,
+                        "submission_identifier": pda.submission_identifier,
+                        "title": pda.title,
+                        "category": pda.get_category_display(),
+                        "submission_date": pda.submission_date.isoformat(),
+                        "similarity_score": float(similarity),
+                        "face_location": face_record.face_location,
+                    }
+
+                    matches.append(match_data)
+                    seen_pda_ids.add(pda.id)
+
+            # Sort matches by similarity (highest first)
+            matches.sort(key=lambda x: x["similarity_score"], reverse=True)
+
+            return {"success": True, "matches": matches, "error": None}
+
+        except Exception as e:
+            print(f"Error in face search: {e}")
+            return {"success": False, "error": str(e), "matches": None}

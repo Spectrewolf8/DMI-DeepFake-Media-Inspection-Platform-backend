@@ -26,7 +26,9 @@ logger = logging.getLogger(__name__)
 forum_controller = CommunityForumController()
 
 
-# Thread Management Views
+# THREAD MANAGEMENT VIEWS
+
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 @parser_classes([JSONParser])
@@ -41,6 +43,7 @@ def create_thread(request):
 
     Optional fields:
     - tags: List of tag IDs
+    - is_pinned: Whether the thread should be pinned (moderators only)
     """
     try:
         user = request.user
@@ -51,14 +54,20 @@ def create_thread(request):
         content = request.data.get("content")
         topic_id = request.data.get("topic_id")
         tags = request.data.get("tags", [])
+        is_pinned = request.data.get("is_pinned", False)
 
         result = forum_controller.create_thread(
-            title=title, content=content, user_data=user_data, topic_id=topic_id, tags=tags
+            title=title, 
+            content=content, 
+            user_data=user_data, 
+            topic_id=topic_id, 
+            tags=tags,
+            is_pinned=is_pinned
         )
 
         if result["success"]:
             return JsonResponse(
-                {**get_response_code("SUCCESS"), **result}, status=status.HTTP_201_CREATED
+                {**get_response_code("FORUM_THREAD_CREATED"), **result}, status=status.HTTP_201_CREATED
             )
         else:
             return JsonResponse(
@@ -79,116 +88,6 @@ def create_thread(request):
         )
 
 
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
-@parser_classes([MultiPartParser, FormParser])
-def add_reply(request, thread_id):
-    """
-    Add a reply to a thread or another reply
-
-    Required fields:
-    - content: Reply content
-
-    Optional fields:
-    - parent_reply_id: ID of parent reply if this is a nested reply
-    - media_file: Media file attachment
-    """
-    try:
-        user = request.user
-        user_data = UserData.objects.get(user=user)
-
-        # Get fields
-        content = request.data.get("content")
-        parent_reply_id = request.data.get("parent_reply_id")
-        media_file = request.FILES.get("media_file")
-
-        result = forum_controller.add_reply(
-            thread_id=thread_id,
-            content=content,
-            user_data=user_data,
-            parent_reply_id=parent_reply_id,
-            media_file=media_file,
-        )
-
-        if result["success"]:
-            return JsonResponse(
-                {**get_response_code("SUCCESS"), **result}, status=status.HTTP_201_CREATED
-            )
-        else:
-            if result["code"] == "FORUM_THREAD_NOT_FOUND":
-                return JsonResponse(
-                    {**get_response_code(result["code"]), "error": result["error"]},
-                    status=status.HTTP_404_NOT_FOUND,
-                )
-            else:
-                return JsonResponse(
-                    {**get_response_code(result["code"]), "error": result["error"]},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-    except UserData.DoesNotExist:
-        return JsonResponse(
-            {**get_response_code("USER_DATA_NOT_FOUND"), "error": "User data not found."},
-            status=status.HTTP_404_NOT_FOUND,
-        )
-    except Exception as e:
-        logger.error(f"Error in add_reply: {str(e)}")
-        return JsonResponse(
-            {**get_response_code("SERVER_ERROR"), "error": str(e)},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
-
-
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
-@parser_classes([JSONParser])
-def toggle_like(request):
-    """
-    Toggle like/upvote on a thread or reply
-
-    Required fields (one of):
-    - thread_id: ID of thread to like
-    - reply_id: ID of reply to like
-    """
-    try:
-        user = request.user
-        user_data = UserData.objects.get(user=user)
-
-        # Get fields
-        thread_id = request.data.get("thread_id")
-        reply_id = request.data.get("reply_id")
-
-        result = forum_controller.toggle_like(
-            user_data=user_data, thread_id=thread_id, reply_id=reply_id
-        )
-
-        if result["success"]:
-            return JsonResponse({**get_response_code("SUCCESS"), **result}, status=status.HTTP_200_OK)
-        else:
-            if "NOT_FOUND" in result["code"]:
-                return JsonResponse(
-                    {**get_response_code(result["code"]), "error": result["error"]},
-                    status=status.HTTP_404_NOT_FOUND,
-                )
-            else:
-                return JsonResponse(
-                    {**get_response_code(result["code"]), "error": result["error"]},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-    except UserData.DoesNotExist:
-        return JsonResponse(
-            {**get_response_code("USER_DATA_NOT_FOUND"), "error": "User data not found."},
-            status=status.HTTP_404_NOT_FOUND,
-        )
-    except Exception as e:
-        logger.error(f"Error in toggle_like: {str(e)}")
-        return JsonResponse(
-            {**get_response_code("SERVER_ERROR"), "error": str(e)},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
-
-
 @api_view(["PUT"])
 @permission_classes([IsAuthenticated])
 @parser_classes([JSONParser])
@@ -200,6 +99,8 @@ def edit_thread(request, thread_id):
     - title: New title
     - content: New content
     - tags: New list of tag IDs
+    - is_pinned: Whether the thread should be pinned (moderators only)
+    - is_locked: Whether the thread should be locked (moderators only)
     """
     try:
         user = request.user
@@ -209,9 +110,11 @@ def edit_thread(request, thread_id):
         title = request.data.get("title")
         content = request.data.get("content")
         tags = request.data.get("tags") if "tags" in request.data else None
+        is_pinned = request.data.get("is_pinned") if "is_pinned" in request.data else None
+        is_locked = request.data.get("is_locked") if "is_locked" in request.data else None
 
         # Check if at least one field is provided
-        if title is None and content is None and tags is None:
+        if title is None and content is None and tags is None and is_pinned is None and is_locked is None:
             return JsonResponse(
                 {
                     **get_response_code("FORUM_MISSING_FIELDS"),
@@ -221,11 +124,19 @@ def edit_thread(request, thread_id):
             )
 
         result = forum_controller.edit_thread(
-            thread_id=thread_id, user_data=user_data, title=title, content=content, tags=tags
+            thread_id=thread_id, 
+            user_data=user_data, 
+            title=title, 
+            content=content, 
+            tags=tags,
+            is_pinned=is_pinned,
+            is_locked=is_locked
         )
 
         if result["success"]:
-            return JsonResponse({**get_response_code("SUCCESS"), **result}, status=status.HTTP_200_OK)
+            return JsonResponse(
+                {**get_response_code("FORUM_THREAD_UPDATED"), **result}, status=status.HTTP_200_OK
+            )
         else:
             if result["code"] == "FORUM_THREAD_NOT_FOUND":
                 return JsonResponse(
@@ -267,7 +178,9 @@ def delete_thread(request, thread_id):
         result = forum_controller.delete_thread(thread_id=thread_id, user_data=user_data)
 
         if result["success"]:
-            return JsonResponse({**get_response_code("SUCCESS"), **result}, status=status.HTTP_200_OK)
+            return JsonResponse(
+                {**get_response_code("FORUM_THREAD_DELETED"), **result}, status=status.HTTP_200_OK
+            )
         else:
             if result["code"] == "FORUM_THREAD_NOT_FOUND":
                 return JsonResponse(
@@ -292,6 +205,81 @@ def delete_thread(request, thread_id):
         )
     except Exception as e:
         logger.error(f"Error in delete_thread: {str(e)}")
+        return JsonResponse(
+            {**get_response_code("SERVER_ERROR"), "error": str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+# REPLY MANAGEMENT VIEWS
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+@parser_classes([MultiPartParser, FormParser])
+def add_reply(request, thread_id):
+    """
+    Add a reply to a thread or another reply
+
+    Required fields:
+    - content: Reply content
+
+    Optional fields:
+    - parent_reply_id: ID of parent reply if this is a nested reply
+    - media_file: Media file attachment
+    - is_solution: Whether this reply should be marked as solution (thread author or moderator only)
+    """
+    try:
+        user = request.user
+        user_data = UserData.objects.get(user=user)
+
+        # Get fields
+        content = request.data.get("content")
+        parent_reply_id = request.data.get("parent_reply_id")
+        media_file = request.FILES.get("media_file")
+        is_solution = request.data.get("is_solution", False)
+        
+        # Convert string 'true'/'false' to boolean if needed
+        if isinstance(is_solution, str):
+            is_solution = is_solution.lower() == 'true'
+
+        result = forum_controller.add_reply(
+            thread_id=thread_id,
+            content=content,
+            user_data=user_data,
+            parent_reply_id=parent_reply_id,
+            media_file=media_file,
+            is_solution=is_solution
+        )
+
+        if result["success"]:
+            return JsonResponse(
+                {**get_response_code("FORUM_REPLY_CREATED"), **result}, status=status.HTTP_201_CREATED
+            )
+        else:
+            if result["code"] == "FORUM_THREAD_NOT_FOUND":
+                return JsonResponse(
+                    {**get_response_code(result["code"]), "error": result["error"]},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            elif result["code"] == "FORUM_THREAD_LOCKED":
+                return JsonResponse(
+                    {**get_response_code(result["code"]), "error": result["error"]},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            else:
+                return JsonResponse(
+                    {**get_response_code(result["code"]), "error": result["error"]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+    except UserData.DoesNotExist:
+        return JsonResponse(
+            {**get_response_code("USER_DATA_NOT_FOUND"), "error": "User data not found."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    except Exception as e:
+        logger.error(f"Error in add_reply: {str(e)}")
         return JsonResponse(
             {**get_response_code("SERVER_ERROR"), "error": str(e)},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -324,7 +312,9 @@ def edit_reply(request, reply_id):
         result = forum_controller.edit_reply(reply_id=reply_id, user_data=user_data, content=content)
 
         if result["success"]:
-            return JsonResponse({**get_response_code("SUCCESS"), **result}, status=status.HTTP_200_OK)
+            return JsonResponse(
+                {**get_response_code("FORUM_REPLY_UPDATED"), **result}, status=status.HTTP_200_OK
+            )
         else:
             if result["code"] == "FORUM_REPLY_NOT_FOUND":
                 return JsonResponse(
@@ -366,7 +356,9 @@ def delete_reply(request, reply_id):
         result = forum_controller.delete_reply(reply_id=reply_id, user_data=user_data)
 
         if result["success"]:
-            return JsonResponse({**get_response_code("SUCCESS"), **result}, status=status.HTTP_200_OK)
+            return JsonResponse(
+                {**get_response_code("FORUM_REPLY_DELETED"), **result}, status=status.HTTP_200_OK
+            )
         else:
             if result["code"] == "FORUM_REPLY_NOT_FOUND":
                 return JsonResponse(
@@ -397,7 +389,214 @@ def delete_reply(request, reply_id):
         )
 
 
-# Navigation & Search Views
+# REACTION AND LIKE VIEWS
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+@parser_classes([JSONParser])
+def toggle_like(request):
+    """
+    Toggle like/upvote on a thread or reply
+
+    Required fields (one of):
+    - thread_id: ID of thread to like
+    - reply_id: ID of reply to like
+    """
+    try:
+        user = request.user
+        user_data = UserData.objects.get(user=user)
+
+        # Get fields
+        thread_id = request.data.get("thread_id")
+        reply_id = request.data.get("reply_id")
+
+        result = forum_controller.toggle_like(
+            user_data=user_data, thread_id=thread_id, reply_id=reply_id, like_type="like"
+        )
+
+        if result["success"]:
+            # Use the specific response code returned by the controller
+            response_code = result["code"]
+            return JsonResponse(
+                {**get_response_code(response_code), **result}, status=status.HTTP_200_OK
+            )
+        else:
+            if "NOT_FOUND" in result["code"]:
+                return JsonResponse(
+                    {**get_response_code(result["code"]), "error": result["error"]},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            else:
+                return JsonResponse(
+                    {**get_response_code(result["code"]), "error": result["error"]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+    except UserData.DoesNotExist:
+        return JsonResponse(
+            {**get_response_code("USER_DATA_NOT_FOUND"), "error": "User data not found."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    except Exception as e:
+        logger.error(f"Error in toggle_like: {str(e)}")
+        return JsonResponse(
+            {**get_response_code("SERVER_ERROR"), "error": str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+@parser_classes([JSONParser])
+def toggle_dislike(request):
+    """
+    Toggle dislike/downvote on a thread or reply
+
+    Required fields (one of):
+    - thread_id: ID of thread to dislike
+    - reply_id: ID of reply to dislike
+    """
+    try:
+        user = request.user
+        user_data = UserData.objects.get(user=user)
+
+        # Get fields
+        thread_id = request.data.get("thread_id")
+        reply_id = request.data.get("reply_id")
+
+        result = forum_controller.toggle_like(
+            user_data=user_data, thread_id=thread_id, reply_id=reply_id, like_type="dislike"
+        )
+
+        if result["success"]:
+            # Use the specific response code returned by the controller
+            response_code = result["code"]
+            return JsonResponse(
+                {**get_response_code(response_code), **result}, status=status.HTTP_200_OK
+            )
+        else:
+            if "NOT_FOUND" in result["code"]:
+                return JsonResponse(
+                    {**get_response_code(result["code"]), "error": result["error"]},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            else:
+                return JsonResponse(
+                    {**get_response_code(result["code"]), "error": result["error"]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+    except UserData.DoesNotExist:
+        return JsonResponse(
+            {**get_response_code("USER_DATA_NOT_FOUND"), "error": "User data not found."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    except Exception as e:
+        logger.error(f"Error in toggle_dislike: {str(e)}")
+        return JsonResponse(
+            {**get_response_code("SERVER_ERROR"), "error": str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+@parser_classes([JSONParser])
+def add_reaction(request):
+    """
+    Add emoji reaction to a thread or reply
+
+    Required fields:
+    - reaction_type: Type of reaction (emoji code)
+    - thread_id OR reply_id: Target to react to
+    """
+    try:
+        user = request.user
+        user_data = UserData.objects.get(user=user)
+
+        # Get fields
+        reaction_type = request.data.get("reaction_type")
+        thread_id = request.data.get("thread_id")
+        reply_id = request.data.get("reply_id")
+
+        # Use controller method to add reaction
+        result = forum_controller.add_reaction(
+            user_data=user_data, reaction_type=reaction_type, thread_id=thread_id, reply_id=reply_id
+        )
+
+        if result["success"]:
+            # Use the specific response code returned by the controller
+            response_code = result["code"]
+            return JsonResponse(
+                {**get_response_code(response_code), **result}, status=status.HTTP_200_OK
+            )
+        else:
+            if "NOT_FOUND" in result["code"]:
+                return JsonResponse(
+                    {**get_response_code(result["code"]), "error": result["error"]},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            else:
+                return JsonResponse(
+                    {**get_response_code(result["code"]), "error": result["error"]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+    except UserData.DoesNotExist:
+        return JsonResponse(
+            {**get_response_code("USER_DATA_NOT_FOUND"), "error": "User data not found."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    except Exception as e:
+        logger.error(f"Error in add_reaction: {str(e)}")
+        return JsonResponse(
+            {**get_response_code("FORUM_REACTION_ERROR"), "error": str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def get_reaction_counts(request, thread_id=None, reply_id=None):
+    """
+    Get reaction counts for a thread or reply
+
+    URL parameters (one of):
+    - thread_id: ID of thread
+    - reply_id: ID of reply
+    """
+    try:
+        # Use controller method to get reaction counts
+        if thread_id:
+            reaction_counts = forum_controller.get_reaction_counts(thread_id=thread_id)
+        elif reply_id:
+            reaction_counts = forum_controller.get_reaction_counts(reply_id=reply_id)
+        else:
+            return JsonResponse(
+                {
+                    **get_response_code("FORUM_INVALID_REACTION_TARGET"),
+                    "error": "Must provide either thread_id or reply_id",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return JsonResponse(
+            {**get_response_code("SUCCESS"), "reaction_counts": reaction_counts},
+            status=status.HTTP_200_OK,
+        )
+
+    except Exception as e:
+        logger.error(f"Error in get_reaction_counts: {str(e)}")
+        return JsonResponse(
+            {**get_response_code("FORUM_REACTION_ERROR"), "error": str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+# NAVIGATION AND SEARCH VIEWS
+
+
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def get_threads(request):
@@ -435,7 +634,9 @@ def get_threads(request):
         )
 
         if result["success"]:
-            return JsonResponse({**get_response_code("SUCCESS"), **result}, status=status.HTTP_200_OK)
+            return JsonResponse(
+                {**get_response_code("FORUM_THREADS_FETCHED"), **result}, status=status.HTTP_200_OK
+            )
         else:
             return JsonResponse(
                 {**get_response_code(result["code"]), "error": result["error"]},
@@ -458,7 +659,10 @@ def get_threads(request):
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def get_thread_detail(request, thread_id):
-    """Get detailed information about a thread"""
+    """
+    Get detailed information about a thread.
+    Returns all thread details including author info, reactions, tags, etc.
+    """
     try:
         # Check if user is authenticated
         user_data = None
@@ -468,30 +672,46 @@ def get_thread_detail(request, thread_id):
         result = forum_controller.get_thread_detail(thread_id=thread_id, user_data=user_data)
 
         if result["success"]:
-            return JsonResponse({**get_response_code("SUCCESS"), **result}, status=status.HTTP_200_OK)
+            response_data = {
+                "status": "success",
+                "code": "FORUM_THREAD_FETCHED",
+                "message": "Thread details retrieved successfully",
+                "data": result["thread"]
+            }
+            return JsonResponse(response_data, status=status.HTTP_200_OK)
         else:
-            if result["code"] == "FORUM_THREAD_NOT_FOUND" or result["code"] == "FORUM_THREAD_DELETED":
-                return JsonResponse(
-                    {**get_response_code(result["code"]), "error": result["error"]},
-                    status=status.HTTP_404_NOT_FOUND,
-                )
-            elif result["code"] == "FORUM_THREAD_NOT_APPROVED":
-                return JsonResponse(
-                    {**get_response_code(result["code"]), "error": result["error"]},
-                    status=status.HTTP_403_FORBIDDEN,
-                )
+            error_code = result["code"]
+            
+            if error_code in ["FORUM_THREAD_NOT_FOUND", "FORUM_THREAD_DELETED"]:
+                response_data = {
+                    "status": "error",
+                    "code": error_code,
+                    "message": result["error"]
+                }
+                return JsonResponse(response_data, status=status.HTTP_404_NOT_FOUND)
+            elif error_code == "FORUM_THREAD_NOT_APPROVED":
+                response_data = {
+                    "status": "error",
+                    "code": error_code,
+                    "message": result["error"]
+                }
+                return JsonResponse(response_data, status=status.HTTP_403_FORBIDDEN)
             else:
-                return JsonResponse(
-                    {**get_response_code(result["code"]), "error": result["error"]},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+                response_data = {
+                    "status": "error",
+                    "code": error_code,
+                    "message": result["error"]
+                }
+                return JsonResponse(response_data, status=status.HTTP_400_BAD_REQUEST)
 
     except Exception as e:
         logger.error(f"Error in get_thread_detail: {str(e)}")
-        return JsonResponse(
-            {**get_response_code("SERVER_ERROR"), "error": str(e)},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
+        response_data = {
+            "status": "error",
+            "code": "FORUM_THREAD_DETAIL_ERROR",
+            "message": str(e)
+        }
+        return JsonResponse(response_data, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(["GET"])
@@ -502,69 +722,18 @@ def get_topics(request):
         result = forum_controller.get_topics()
 
         if result["success"]:
-            return JsonResponse({**get_response_code("SUCCESS"), **result}, status=status.HTTP_200_OK)
-        else:
             return JsonResponse(
-                {**get_response_code(result["code"]), "error": result["error"]},
-                status=status.HTTP_400_BAD_REQUEST,  # filepath: /home/b450-plus/DMI_FYP_dj_primary-backend/DMI_FYP_dj_primary-backend/DMI_backend/api/views/community_forum_views.py
-            )
-    except Exception as e:
-        logger.error(f"Error in get_topics: {str(e)}")
-        return JsonResponse(
-            {**get_response_code("SERVER_ERROR"), "error": str(e)},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
-
-
-# Thread Management Views
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
-@parser_classes([JSONParser])
-def create_thread(request):
-    """
-    Create a new thread in the community forum
-
-    Required fields:
-    - title: Thread title
-    - content: Thread content
-    - topic_id: ID of the topic
-
-    Optional fields:
-    - tags: List of tag IDs
-    """
-    try:
-        user = request.user
-        user_data = UserData.objects.get(user=user)
-
-        # Get required fields
-        title = request.data.get("title")
-        content = request.data.get("content")
-        topic_id = request.data.get("topic_id")
-        tags = request.data.get("tags", [])
-
-        result = forum_controller.create_thread(
-            title=title, content=content, user_data=user_data, topic_id=topic_id, tags=tags
-        )
-
-        if result["success"]:
-            return JsonResponse(
-                {**get_response_code("SUCCESS"), **result}, status=status.HTTP_201_CREATED
+                {**get_response_code("FORUM_TOPICS_FETCHED"), **result}, status=status.HTTP_200_OK
             )
         else:
             return JsonResponse(
                 {**get_response_code(result["code"]), "error": result["error"]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
-    except UserData.DoesNotExist:
-        return JsonResponse(
-            {**get_response_code("USER_DATA_NOT_FOUND"), "error": "User data not found."},
-            status=status.HTTP_404_NOT_FOUND,
-        )
     except Exception as e:
-        logger.error(f"Error in create_thread: {str(e)}")
+        logger.error(f"Error in get_topics: {str(e)}")
         return JsonResponse(
-            {**get_response_code("SERVER_ERROR"), "error": str(e)},
+            {**get_response_code("FORUM_TOPICS_ERROR"), "error": str(e)},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
@@ -577,7 +746,9 @@ def get_tags(request):
         result = forum_controller.get_tags()
 
         if result["success"]:
-            return JsonResponse({**get_response_code("SUCCESS"), **result}, status=status.HTTP_200_OK)
+            return JsonResponse(
+                {**get_response_code("FORUM_TAGS_FETCHED"), **result}, status=status.HTTP_200_OK
+            )
         else:
             return JsonResponse(
                 {**get_response_code(result["code"]), "error": result["error"]},
@@ -587,7 +758,7 @@ def get_tags(request):
     except Exception as e:
         logger.error(f"Error in get_tags: {str(e)}")
         return JsonResponse(
-            {**get_response_code("SERVER_ERROR"), "error": str(e)},
+            {**get_response_code("FORUM_TAGS_ERROR"), "error": str(e)},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
@@ -615,7 +786,9 @@ def search_threads(request):
         result = forum_controller.search_threads(query=query, page=page, items_per_page=items_per_page)
 
         if result["success"]:
-            return JsonResponse({**get_response_code("SUCCESS"), **result}, status=status.HTTP_200_OK)
+            return JsonResponse(
+                {**get_response_code("FORUM_SEARCH_RESULTS"), **result}, status=status.HTTP_200_OK
+            )
         else:
             if result["code"] == "FORUM_SEARCH_TOO_SHORT":
                 return JsonResponse(
@@ -636,163 +809,73 @@ def search_threads(request):
     except Exception as e:
         logger.error(f"Error in search_threads: {str(e)}")
         return JsonResponse(
-            {**get_response_code("SERVER_ERROR"), "error": str(e)},
+            {**get_response_code("FORUM_SEARCH_ERROR"), "error": str(e)},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 
-api_view(["POST"])
-
-
-@permission_classes([IsAuthenticated])
-def add_reaction(self, user_data, reaction_type, thread_id=None, reply_id=None):
-    """
-    Add emoji reaction to a thread or reply
-
-    Args:
-        user_data (UserData): User data of the reactor
-        reaction_type (str): Type of reaction (emoji code)
-        thread_id (int, optional): ID of thread to react to
-        reply_id (int, optional): ID of reply to react to
-
-    Returns:
-        dict: Response with reaction status
-    """
-    try:
-        # Check if either thread_id or reply_id is provided
-        if (thread_id is None and reply_id is None) or (thread_id and reply_id):
-            return {
-                "success": False,
-                "error": "Must provide either thread_id or reply_id, not both",
-                "code": "FORUM_INVALID_REACTION_TARGET",
-            }
-
-        # Validate reaction type
-        valid_reactions = ["like", "love", "laugh", "wow", "sad", "angry"]
-        if reaction_type not in valid_reactions:
-            return {
-                "success": False,
-                "error": f"Invalid reaction type. Valid types: {', '.join(valid_reactions)}",
-                "code": "FORUM_INVALID_REACTION_TYPE",
-            }
-
-        # Find the target object
-        target = None
-        if thread_id:
-            try:
-                target = ForumThread.objects.get(
-                    id=thread_id, approval_status="approved", is_deleted=False
-                )
-                # Check if user already reacted with this type
-                existing_reaction = ForumReaction.objects.filter(
-                    user=user_data, thread=target, reaction_type=reaction_type
-                ).first()
-
-                # Remove any previous reactions of different types
-                ForumReaction.objects.filter(user=user_data, thread=target).exclude(
-                    reaction_type=reaction_type
-                ).delete()
-
-            except ForumThread.DoesNotExist:
-                return {
-                    "success": False,
-                    "error": "Thread not found or not approved",
-                    "code": "FORUM_THREAD_NOT_FOUND",
-                }
-        else:
-            try:
-                target = ForumReply.objects.get(id=reply_id, is_deleted=False)
-                # Check if user already reacted with this type
-                existing_reaction = ForumReaction.objects.filter(
-                    user=user_data, reply=target, reaction_type=reaction_type
-                ).first()
-
-                # Remove any previous reactions of different types
-                ForumReaction.objects.filter(user=user_data, reply=target).exclude(
-                    reaction_type=reaction_type
-                ).delete()
-
-            except ForumReply.DoesNotExist:
-                return {
-                    "success": False,
-                    "error": "Reply not found",
-                    "code": "FORUM_REPLY_NOT_FOUND",
-                }
-
-        # Toggle reaction status
-        if existing_reaction:
-            existing_reaction.delete()
-            action = "removed"
-        else:
-            # Create new reaction
-            if thread_id:
-                ForumReaction.objects.create(user=user_data, thread=target, reaction_type=reaction_type)
-            else:
-                ForumReaction.objects.create(user=user_data, reply=target, reaction_type=reaction_type)
-            action = "added"
-
-        # Get updated reaction counts
-        if thread_id:
-            reaction_counts = self.get_reaction_counts(thread_id=thread_id)
-        else:
-            reaction_counts = self.get_reaction_counts(reply_id=reply_id)
-
-        return {
-            "success": True,
-            "action": action,
-            "reaction_type": reaction_type,
-            "reaction_counts": reaction_counts,
-            "code": f"FORUM_REACTION_{action.upper()}",
-        }
-
-    except Exception as e:
-        logger.error(f"Error toggling reaction: {str(e)}")
-        return {
-            "success": False,
-            "error": f"Error toggling reaction: {str(e)}",
-            "code": "FORUM_REACTION_ERROR",
-        }
-
-
 @api_view(["GET"])
 @permission_classes([AllowAny])
-def get_reaction_counts(self, thread_id=None, reply_id=None):
+def get_thread_replies(request, thread_id):
     """
-    Get reaction counts for a thread or reply
+    Get replies for a specific thread
 
-    Args:
-        thread_id (int, optional): ID of thread
-        reply_id (int, optional): ID of reply
+    URL parameters:
+    - thread_id: ID of the thread
 
-    Returns:
-        dict: Counts for each reaction type
+    Query parameters:
+    - page: Page number (default: 1)
+    - items: Items per page (default: 20)
     """
-    reaction_counts = {}
-
     try:
-        if thread_id:
-            # Get all reactions for this thread
-            reactions = (
-                ForumReaction.objects.filter(thread_id=thread_id)
-                .values("reaction_type")
-                .annotate(count=count("id"))
-            )
-        elif reply_id:
-            # Get all reactions for this reply
-            reactions = (
-                ForumReaction.objects.filter(reply_id=reply_id)
-                .values("reaction_type")
-                .annotate(count=count("id"))
+        # Check if user is authenticated
+        user_data = None
+        if request.user.is_authenticated:
+            user_data = UserData.objects.get(user=request.user)
+
+        # Get query parameters
+        page = int(request.query_params.get("page", 1))
+        items_per_page = int(request.query_params.get("items", 20))
+        
+        # Limit items per page to prevent overload
+        items_per_page = min(items_per_page, 50)
+
+        result = forum_controller.get_thread_replies(
+            thread_id=thread_id, 
+            user_data=user_data, 
+            page=page, 
+            items_per_page=items_per_page
+        )
+
+        if result["success"]:
+            return JsonResponse(
+                {**get_response_code("FORUM_REPLIES_FETCHED"), **result}, status=status.HTTP_200_OK
             )
         else:
-            return {}
+            if result["code"] == "FORUM_THREAD_NOT_FOUND":
+                return JsonResponse(
+                    {**get_response_code(result["code"]), "error": result["error"]},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            elif result["code"] == "FORUM_THREAD_NOT_APPROVED":
+                return JsonResponse(
+                    {**get_response_code(result["code"]), "error": result["error"]},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            else:
+                return JsonResponse(
+                    {**get_response_code(result["code"]), "error": result["error"]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
-        # Convert to dictionary format
-        for reaction in reactions:
-            reaction_counts[reaction["reaction_type"]] = reaction["count"]
-
-        return reaction_counts
-
+    except ValueError:
+        return JsonResponse(
+            {**get_response_code("INVALID_REQUEST"), "error": "Invalid page or items parameter"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
     except Exception as e:
-        logger.error(f"Error getting reaction counts: {str(e)}")
-        return {}
+        logger.error(f"Error in get_thread_replies: {str(e)}")
+        return JsonResponse(
+            {**get_response_code("FORUM_REPLIES_ERROR"), "error": str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )

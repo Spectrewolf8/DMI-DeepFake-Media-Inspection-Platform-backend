@@ -211,7 +211,17 @@ class ForumThread(models.Model):
     is_pinned = models.BooleanField(default=False)  # For pinning important threads
     is_locked = models.BooleanField(default=False)  # For preventing new replies
     
+    reviewed_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name="reviewed_threads"
+    )
+    review_date = models.DateTimeField(null=True, blank=True)
+    review_notes = models.TextField(blank=True, null=True)
+    
     view_count = models.IntegerField(default=0)
+    
+    # Media attachment for thread
+    media_url = models.CharField(max_length=255, blank=True, null=True)
+    media_type = models.CharField(max_length=50, blank=True, null=True)  # image, video, document
     
     class Meta:
         ordering = ['-last_active']
@@ -225,6 +235,12 @@ class ForumThread(models.Model):
 
     def __str__(self):
         return self.title
+
+    def save(self, *args, **kwargs):
+        # If thread is being approved or rejected and has no review date, set it
+        if self.approval_status in ['approved', 'rejected'] and not self.review_date:
+            self.review_date = timezone.now()
+        super().save(*args, **kwargs)
 
 
 class ForumReply(models.Model):

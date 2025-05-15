@@ -1,7 +1,9 @@
+import re
 import logging
 import os
 import time
 import uuid
+import urllib.parse
 from datetime import datetime
 
 from django.conf import settings
@@ -9,6 +11,9 @@ from django.core.files.storage import FileSystemStorage
 from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
 from django.db.models import Q, Count, F
 from django.utils import timezone
+
+# Use URLHelper to convert to public URL
+from app.controllers.HelpersController import URLHelper
 
 from api.models import (
     KnowledgeBaseArticle,
@@ -26,6 +31,23 @@ class KnowledgeBaseController:
     Controller for managing knowledge base articles, topics, and related operations.
     Handles article creation, retrieval, search, and statistics tracking.
     """
+
+    def _generate_clean_preview(self, html_content, max_length=256):
+        """Generate a clean text preview from HTML content."""
+        if not html_content:
+            return ""
+
+        # Remove all HTML tags
+        text = re.sub(r"<.*?>", "", html_content)
+
+        # Normalize whitespace
+        text = re.sub(r"\s+", " ", text).strip()
+
+        # Truncate if necessary
+        if len(text) > max_length:
+            return text[:max_length] + "..."
+
+        return text
 
     def get_articles(self, topic_id=None, page=1, items_per_page=10, search_query=None):
         """
@@ -72,7 +94,16 @@ class KnowledgeBaseController:
             # Format articles for response
             result_articles = []
             for article in paginated_articles:
-                # Calculate read time (average reading speed: 200 words per minute)
+                # Generate clean text preview without HTML
+                preview = self._generate_clean_preview(article.content)
+
+                # Ensure banner image is a full public URL
+                banner_image = None
+                if article.banner_image:
+                    # The URLHelper.convert_to_public_url now handles all cases properly
+                    banner_image = URLHelper.convert_to_public_url(article.banner_image)
+
+                # Calculate read time
                 word_count = len(article.content.split())
                 read_time = max(1, round(word_count / 200))
 
@@ -81,6 +112,7 @@ class KnowledgeBaseController:
                     {
                         "id": article.id,
                         "title": article.title,
+                        "banner_image": banner_image,
                         "author": {
                             "username": article.author.user.username,
                             "avatar": article.author.profile_image_url,
@@ -95,9 +127,10 @@ class KnowledgeBaseController:
                             if article.topic
                             else None
                         ),
-                        "preview": (article.content[:200] + "..." if len(article.content) > 200 else article.content),
+                        "preview": preview,
                         "view_count": getattr(article, "view_count", 0),
                         "has_attachments": article.attachments.exists(),
+                        "read_time": read_time,
                     }
                 )
 
@@ -161,10 +194,20 @@ class KnowledgeBaseController:
                 view_count = 0
 
             # Format article data for response
+            # Ensure banner image is a full public URL
+            banner_image = None
+            if article.banner_image:
+                # The URLHelper.convert_to_public_url now handles all cases properly
+                banner_image = URLHelper.convert_to_public_url(article.banner_image)
+
+            # Get share links for the article
+            share_links_result = self.get_share_links(article.id)
+            share_links = share_links_result.get("share_links", {}) if share_links_result.get("success", False) else {}
+
             article_data = {
                 "id": article.id,
                 "title": article.title,
-                "banner_image": article.banner_image,
+                "banner_image": banner_image,
                 "author": {
                     "username": article.author.user.username,
                     "avatar": article.author.profile_image_url,
@@ -186,6 +229,7 @@ class KnowledgeBaseController:
                 "view_count": view_count,
                 "attachments": attachments,
                 "related_articles": self._get_related_articles(article),
+                "share_links": share_links,
             }
 
             return {
@@ -510,15 +554,35 @@ class KnowledgeBaseController:
         try:
             article = KnowledgeBaseArticle.objects.get(id=article_id, is_published=True, is_deleted=False)
 
-            # Generate base URL for article
-            base_url = f"{settings.SITE_URL}/knowledge/article/{article.id}"
+            # Generate base URL for article using HOST_URL from settings
+            base_url = f"{settings.HOST_URL}/knowledge/article/{article.id}"
+
+            # If HOST_URL is not available or empty, use fallback strategies
+            if not hasattr(settings, "HOST_URL") or not settings.HOST_URL:
+                # Try with FRONTEND_HOST_URL if available
+                if hasattr(settings, "FRONTEND_HOST_URL") and settings.FRONTEND_HOST_URL:
+                    base_url = f"{settings.FRONTEND_HOST_URL}/knowledge/article/{article.id}"
+                # Fallback to allowed hosts if available
+                elif hasattr(settings, "ALLOWED_HOSTS") and settings.ALLOWED_HOSTS:
+                    domain = settings.ALLOWED_HOSTS[0]
+                    base_url = f"https://{domain}/knowledge/article/{article.id}"
+                else:
+                    # Use a placeholder that frontend can replace
+                    base_url = f"/knowledge/article/{article.id}"
+
+            # Get the article title for share text
+            article_title = article.title.strip() if article.title else "Knowledge Base Article"
+
+            # URL encode the article title for sharing
+            encoded_title = urllib.parse.quote(article_title)
 
             # Generate sharing links
             share_links = {
-                "twitter": f"https://twitter.com/intent/tweet?url={base_url}&text={article.title}",
+                "twitter": f"https://twitter.com/intent/tweet?url={base_url}&text={encoded_title}",
                 "facebook": f"https://www.facebook.com/sharer/sharer.php?u={base_url}",
-                "linkedin": f"https://www.linkedin.com/shareArticle?mini=true&url={base_url}&title={article.title}",
-                "email": f"mailto:?subject={article.title}&body=Check out this article: {base_url}",
+                "linkedin": f"https://www.linkedin.com/shareArticle?mini=true&url={base_url}&title={encoded_title}",
+                "email": f"mailto:?subject={article_title}&body=Check out this article: {base_url}",
+                "copy": base_url,  # Add direct URL for copy-to-clipboard functionality
             }
 
             return {
@@ -535,10 +599,31 @@ class KnowledgeBaseController:
             }
         except Exception as e:
             logger.error(f"Error generating share links: {str(e)}")
+            # Return dummy share links instead of an error using HOST_URL if available
+            dummy_base = settings.HOST_URL if hasattr(settings, "HOST_URL") and settings.HOST_URL else ""
+            dummy_url = f"{dummy_base}/knowledge/article/{article_id}"
+            article_title = "Knowledge Base Article"
+
+            # Try to fetch the actual article title if possible
+            try:
+                article_obj = KnowledgeBaseArticle.objects.get(id=article_id)
+                if article_obj and article_obj.title:
+                    article_title = article_obj.title.strip()
+            except Exception:
+                pass  # URL encode the article title for sharing
+                encoded_title = urllib.parse.quote(article_title)
+                dummy_share_links = {
+                    "twitter": f"https://twitter.com/intent/tweet?url={dummy_url}&text={encoded_title}",
+                    "facebook": f"https://www.facebook.com/sharer/sharer.php?u={dummy_url}",
+                    "linkedin": f"https://www.linkedin.com/shareArticle?mini=true&url={dummy_url}&title={encoded_title}",
+                    "email": f"mailto:?subject={article_title}&body=Check out this article: {dummy_url}",
+                    "copy": dummy_url,
+                }
+
             return {
-                "success": False,
-                "error": f"Error generating share links: {str(e)}",
-                "code": "KNOWLEDGE_SHARE_ERROR",
+                "success": True,
+                "share_links": dummy_share_links,
+                "code": "KNOWLEDGE_SHARE_LINKS_GENERATED",
             }
 
     # Helper Methods
@@ -560,46 +645,69 @@ class KnowledgeBaseController:
         attachment_data = []
 
         try:
-            # Create attachments directory if it doesn't exist
-            attachments_dir = os.path.join(settings.MEDIA_ROOT, "knowledge_base")
-            if not os.path.exists(attachments_dir):
-                os.makedirs(attachments_dir, exist_ok=True)
+            # Create base knowledge base directory
+            kb_base_dir = os.path.join(settings.MEDIA_ROOT, "knowledge_base")
+            if not os.path.exists(kb_base_dir):
+                os.makedirs(kb_base_dir, exist_ok=True)
+
+            # Create subdirectories for different types of content
+            kb_attachments_dir = os.path.join(kb_base_dir, "attachments")  # For documents, PDFs
+            kb_images_dir = os.path.join(kb_base_dir, "images")  # For image attachments
+            kb_media_dir = os.path.join(kb_base_dir, "media")  # For video and audio
+
+            # Create each subdirectory if it doesn't exist
+            for directory in [kb_attachments_dir, kb_images_dir, kb_media_dir]:
+                if not os.path.exists(directory):
+                    os.makedirs(directory, exist_ok=True)
 
             # Process each attachment
             for attachment_file in attachments:
-                # Generate unique identifier
-                attachment_identifier = f"kb-{uuid.uuid4().hex[:8]}-{int(time.time())}"
-                original_filename = attachment_file.name
-
-                # Use FileSystemStorage to save the file
-                fs = FileSystemStorage(location=attachments_dir)
-                filename = fs.save(f"{attachment_identifier}-{original_filename}", attachment_file)
-
-                # Store relative path from MEDIA_ROOT
-                file_url = f"knowledge_base/{filename}"
-
-                # Determine file type
+                # Determine file type first to decide where to store it
                 file_extension = os.path.splitext(attachment_file.name)[1].lower()
                 if file_extension in [".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg"]:
                     file_type = "image"
+                    target_dir = kb_images_dir
+                    type_prefix = "img"
                 elif file_extension in [".mp4", ".webm", ".avi", ".mov", ".wmv"]:
                     file_type = "video"
+                    target_dir = kb_media_dir
+                    type_prefix = "vid"
                 elif file_extension in [".mp3", ".wav", ".ogg"]:
                     file_type = "audio"
+                    target_dir = kb_media_dir
+                    type_prefix = "aud"
                 elif file_extension in [".pdf"]:
                     file_type = "pdf"
+                    target_dir = kb_attachments_dir
+                    type_prefix = "pdf"
                 else:
                     file_type = "document"
+                    target_dir = kb_attachments_dir
+                    type_prefix = "doc"
 
-                # Create attachment record
-                attachment = KnowledgeBaseAttachment.objects.create(article=article, filename=original_filename, file_url=file_url, file_type=file_type)
+                # Generate unique identifier using type prefix
+                timestamp = int(time.time())
+                unique_id = uuid.uuid4().hex[:8]
+                attachment_identifier = f"kb-{type_prefix}-{unique_id}-{timestamp}"
+                original_filename = attachment_file.name
 
-                # Add to response data
+                # Use FileSystemStorage to save the file in appropriate directory
+                fs = FileSystemStorage(location=target_dir)
+                filename = fs.save(f"{attachment_identifier}-{original_filename}", attachment_file)
+
+                # Store path relative to MEDIA_ROOT for database
+                rel_path_segments = os.path.relpath(target_dir, settings.MEDIA_ROOT).split(os.sep)
+                rel_path = "/".join(rel_path_segments) + "/" + filename
+
+                # Create attachment record - store relative path without media prefix
+                attachment = KnowledgeBaseAttachment.objects.create(article=article, filename=original_filename, file_url=rel_path, file_type=file_type)
+
+                # Add to response data with full URL including media prefix
                 attachment_data.append(
                     {
                         "id": attachment.id,
                         "filename": original_filename,
-                        "file_url": self._get_full_attachment_url(file_url),
+                        "file_url": self._get_full_attachment_url(rel_path),  # This will add media prefix and use URLHelper
                         "file_type": file_type,
                     }
                 )
@@ -614,10 +722,20 @@ class KnowledgeBaseController:
         if not relative_url:
             return None
 
+        # If it's already a full URL, return it
         if relative_url.startswith("http"):
             return relative_url
 
-        return f"{settings.MEDIA_URL}{relative_url}"
+        # If the relative_url is a relative path, convert it to absolute path
+        import os
+
+        if not os.path.isabs(relative_url):
+            absolute_path = os.path.join(settings.MEDIA_ROOT, relative_url)
+        else:
+            absolute_path = relative_url
+
+        # Now convert to public URL using URLHelper
+        return URLHelper.convert_to_public_url(file_path=absolute_path)
 
     def _get_related_articles(self, article, max_results=3):
         """Get related articles based on topic only (tags removed)"""
@@ -637,6 +755,19 @@ class KnowledgeBaseController:
         # Format for response
         result = []
         for related in related_articles:
+            # Ensure banner image is a public URL
+            banner_image = None
+            if related.banner_image:
+                if os.path.isabs(related.banner_image):
+                    banner_image = URLHelper.convert_to_public_url(related.banner_image)
+                else:
+                    # Handle relative paths - may need to convert to absolute
+                    abs_path = os.path.join(settings.MEDIA_ROOT, related.banner_image) if not related.banner_image.startswith("http") else related.banner_image
+                    banner_image = URLHelper.convert_to_public_url(abs_path) if not related.banner_image.startswith("http") else related.banner_image
+
+            # Use clean preview
+            preview = self._generate_clean_preview(related.content, 120)
+
             result.append(
                 {
                     "id": related.id,
@@ -644,6 +775,8 @@ class KnowledgeBaseController:
                     "author": related.author.user.username,
                     "created_at": related.created_at.strftime("%Y-%m-%d"),
                     "topic": ({"id": related.topic.id, "name": related.topic.name} if related.topic else None),
+                    "banner_image": banner_image,
+                    "preview": preview,
                 }
             )
 

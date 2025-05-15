@@ -26,6 +26,7 @@ from api.models import (
 )
 from app.models import UserData, ModeratorAction
 from app.controllers.KnowledgeBaseController import KnowledgeBaseController
+from app.controllers.HelpersController import URLHelper
 from api.models import KnowledgeBaseArticle, KnowledgeBaseTopic, UserData
 
 logger = logging.getLogger(__name__)
@@ -379,7 +380,7 @@ def custom_admin_pda_list_view(request):
 
     context = {
         "active_page": "pda_submissions",
-        "submissions": page_obj,
+        "pda_submissions": page_obj,  # Changed from 'submissions' to 'pda_submissions'
         "filter_type": filter_type,
         "search_query": search_query,
         "pending_count": PublicDeepfakeArchive.objects.filter(is_approved=False, review_date__isnull=True).count(),
@@ -387,6 +388,8 @@ def custom_admin_pda_list_view(request):
         "rejected_count": PublicDeepfakeArchive.objects.filter(is_approved=False, review_date__isnull=False).count(),
         "total_count": PublicDeepfakeArchive.objects.count(),
         "page_range": range(1, paginator.num_pages + 1),
+        "is_paginated": paginator.count > 0,  # Added this to control pagination display
+        "paginator": paginator,  # Make sure paginator is also in the context
     }
 
     return render(request, "custom_admin/pda_list.html", context)
@@ -597,6 +600,12 @@ def custom_admin_analytics_view(request):
     new_pda = PublicDeepfakeArchive.objects.filter(submission_date__gte=start_date).count()
     approved_pda = PublicDeepfakeArchive.objects.filter(is_approved=True).count()
     rejected_pda = PublicDeepfakeArchive.objects.filter(is_approved=False, review_date__isnull=False).count()
+    pending_pda = total_pda - approved_pda - rejected_pda
+
+    # Calculate percentages
+    approved_pda_percent = (approved_pda / total_pda * 100) if total_pda > 0 else 0
+    rejected_pda_percent = (rejected_pda / total_pda * 100) if total_pda > 0 else 0
+    pending_pda_percent = (pending_pda / total_pda * 100) if total_pda > 0 else 0
 
     # Forum statistics
     total_threads = ForumThread.objects.filter(is_deleted=False).count()
@@ -636,6 +645,10 @@ def custom_admin_analytics_view(request):
 
         timeline_data.append({"date": day_start.strftime("%Y-%m-%d"), "users": day_users, "pda": day_pda, "threads": day_threads, "replies": day_replies})
 
+    # Prepare data for the topics bar chart
+    topic_names = [topic.name for topic in popular_topics[:6]]
+    topic_counts = [topic.thread_count for topic in popular_topics[:6]]
+
     context = {
         "active_page": "analytics",
         "days": days,
@@ -645,6 +658,10 @@ def custom_admin_analytics_view(request):
         "new_pda": new_pda,
         "approved_pda": approved_pda,
         "rejected_pda": rejected_pda,
+        "pending_pda": pending_pda,
+        "approved_pda_percent": round(approved_pda_percent, 1),
+        "rejected_pda_percent": round(rejected_pda_percent, 1),
+        "pending_pda_percent": round(pending_pda_percent, 1),
         "total_threads": total_threads,
         "new_threads": new_threads,
         "total_replies": total_replies,
@@ -656,6 +673,8 @@ def custom_admin_analytics_view(request):
         "pda_data": json.dumps(pda_submissions_data),
         "threads_data": json.dumps(forum_threads_data),
         "replies_data": json.dumps(forum_replies_data),
+        "topic_names": json.dumps(topic_names),
+        "topic_counts": json.dumps(topic_counts),
     }
 
     return render(request, "custom_admin/analytics.html", context)
@@ -1160,27 +1179,109 @@ def admin_upload_image(request):
         if not image_file:
             return JsonResponse({"success": False, "error": "No image file provided"}, status=400)
 
-        # Generate unique identifier
-        attachment_identifier = f"kb-img-{uuid.uuid4().hex[:8]}-{int(time.time())}"
+        # Determine where to store the image based on purpose
+        # Default to inline images (embedded within content)
+        image_purpose = request.POST.get("purpose", "inline")
+
+        if image_purpose == "banner":
+            subdir = "banners"
+            prefix = "kb-banner"
+        elif image_purpose == "inline":
+            subdir = "inline"
+            prefix = "kb-inline"
+        else:
+            subdir = "images"
+            prefix = "kb-img"
+
+        # Generate unique identifier with proper prefix
+        unique_id = uuid.uuid4().hex[:8]
+        timestamp = int(time.time())
+        attachment_identifier = f"{prefix}-{unique_id}-{timestamp}"
         original_filename = image_file.name
 
         # Ensure directory exists
-        upload_dir = os.path.join(settings.MEDIA_ROOT, "knowledge_base", "images")
+        upload_dir = os.path.join(settings.MEDIA_ROOT, "knowledge_base", subdir)
         os.makedirs(upload_dir, exist_ok=True)
 
         # Save file
         file_extension = os.path.splitext(original_filename)[1].lower()
-        filename = f"{attachment_identifier}{file_extension}"
+        filename = f"{attachment_identifier}-{original_filename}"
         file_path = os.path.join(upload_dir, filename)
 
         with open(file_path, "wb+") as destination:
             for chunk in image_file.chunks():
                 destination.write(chunk)
 
-        # Generate URL
-        file_url = f"{settings.MEDIA_URL}knowledge_base/images/{filename}"
+        # Store path relative to MEDIA_ROOT
+        rel_path = f"knowledge_base/{subdir}/{filename}"
 
-        return JsonResponse({"success": True, "location": file_url})
+        # Convert to public URL using URLHelper
+        public_url = URLHelper.convert_to_public_url(file_path)
+
+        return JsonResponse({"success": True, "location": public_url})
     except Exception as e:
         logger.error(f"Error in admin_upload_image: {str(e)}")
         return JsonResponse({"success": False, "error": str(e)}, status=500)
+
+
+def custom_admin_user_delete_view(request, user_id):
+    """View to delete a user"""
+    user = get_object_or_404(User, id=user_id)
+
+    if request.method == "POST":
+        username = user.username
+
+        # Delete the user
+        user.delete()
+
+        # Log the action
+        moderator_action = ModeratorAction(
+            moderator=request.user,
+            action_type="delete",
+            content_type="user",
+            content_identifier=f"User: {username}",
+            notes=f"User {username} was deleted by {request.user.username}",
+        )
+        moderator_action.save()
+
+        messages.success(request, f"User '{username}' has been deleted successfully.")
+        return redirect("custom_admin_users")
+
+    context = {
+        "active_page": "users",
+        "user_obj": user,
+    }
+
+    return render(request, "custom_admin/user_delete_confirm.html", context)
+
+
+def custom_admin_forum_delete_view(request, thread_id):
+    """View to delete a forum thread"""
+    thread = get_object_or_404(ForumThread, id=thread_id)
+
+    if request.method == "POST":
+        thread_title = thread.title
+
+        # Soft delete the thread (set is_deleted flag)
+        thread.is_deleted = True
+        thread.save()
+
+        # Log the action
+        moderator_action = ModeratorAction(
+            moderator=request.user,
+            action_type="delete",
+            content_type="thread",
+            content_identifier=f"Thread: {thread_title}",
+            notes=f"Thread '{thread_title}' was deleted by {request.user.username}",
+        )
+        moderator_action.save()
+
+        messages.success(request, f"Forum thread '{thread_title}' has been deleted.")
+        return redirect("custom_admin_forum")
+
+    context = {
+        "active_page": "forum",
+        "thread": thread,
+    }
+
+    return render(request, "custom_admin/forum_delete_confirm.html", context)

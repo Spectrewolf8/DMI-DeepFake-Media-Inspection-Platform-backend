@@ -414,6 +414,7 @@ document.addEventListener('DOMContentLoaded', function() {
       if (fileInput.files && fileInput.files[0]) {
         const formData = new FormData();
         formData.append('file', fileInput.files[0]);
+        formData.append('purpose', 'banner');  // Specify this is a banner image
         
         try {
           // Upload the banner image
@@ -431,9 +432,12 @@ document.addEventListener('DOMContentLoaded', function() {
           
           if (data.success) {
             // Set the banner image preview and input value
-            bannerPreview.style.backgroundImage = `url('${data.location}')`;
+            // The server should already be returning a public URL via URLHelper.convert_to_public_url
+            const publicUrl = data.location.startsWith('http') ? data.location : `${window.location.origin}${data.location}`;
+            
+            bannerPreview.style.backgroundImage = `url('${publicUrl}')`;
             bannerPreview.style.display = 'block';
-            bannerImageField.value = data.location;
+            bannerImageField.value = publicUrl; // Store the full public URL
             bannerContainer.classList.add('has-banner');
             button.innerHTML = '<i class="fas fa-upload me-1"></i> Change Banner';
           } else {
@@ -589,6 +593,9 @@ document.addEventListener('DOMContentLoaded', function() {
             selection.addRange(range);
           }
           
+          // Add purpose parameter to indicate this is an inline image
+          formData.append('purpose', 'inline');
+          
           // Use the correct URL with no leading slash to ensure proper resolution
           const response = await fetch('{% url "admin_upload_image" %}', {
             method: 'POST',
@@ -607,8 +614,11 @@ document.addEventListener('DOMContentLoaded', function() {
             selection.removeAllRanges();
             selection.addRange(range);
             
+            // Ensure we have a full public URL
+            const publicUrl = data.location.startsWith('http') ? data.location : `${window.location.origin}${data.location}`;
+            
             // Insert the image with responsive class and alt text
-            const imgTag = `<img src="${data.location}" alt="Image" style="max-width: 100%; height: auto; margin: 10px 0;">`;
+            const imgTag = `<img src="${publicUrl}" alt="Image" style="max-width: 100%; height: auto; margin: 10px 0;">`;
             document.execCommand('insertHTML', false, imgTag);
           } else {
             alert('Error uploading image: ' + (data.error || 'Unknown error'));

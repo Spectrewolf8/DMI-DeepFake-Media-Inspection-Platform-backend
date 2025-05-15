@@ -4,6 +4,7 @@ from django.contrib.auth.password_validation import validate_password
 
 # Import API key serializers
 from api.models import APIKey
+from app.models import Donation, UserData
 
 
 class FileUploadSerializer(serializers.Serializer):
@@ -82,36 +83,35 @@ class ChangePasswordSerializer(serializers.Serializer):
         return data
 
 
-class APIKeySerializer(serializers.ModelSerializer):
-    """
-    Serializer for API keys
-    """
+class DonationSerializer(serializers.ModelSerializer):
+    donor_username = serializers.SerializerMethodField()
+    donor_email = serializers.EmailField(required=False)
 
     class Meta:
-        model = APIKey
-        fields = [
-            "id",
-            "name",
-            "key",
-            "is_active",
-            "created_at",
-            "expires_at",
-            "last_used_at",
-            "daily_limit",
-            "daily_usage",
-            "last_usage_date",
-            "can_use_deepfake_detection",
-            "can_use_ai_text_detection",
-            "can_use_ai_media_detection",
-        ]
-        read_only_fields = ["id", "key", "created_at", "last_used_at", "daily_usage", "last_usage_date"]
+        model = Donation
+        fields = ["id", "amount", "currency", "status", "created_at", "updated_at", "donor_name", "donor_email", "is_anonymous", "message", "donor_username"]
+        read_only_fields = ["id", "stripe_payment_id", "stripe_checkout_id", "status", "created_at", "updated_at"]
+
+    def get_donor_username(self, obj):
+        if obj.user and not obj.is_anonymous:
+            return obj.user.user.username
+        return None
 
 
-class APIKeyCreateSerializer(serializers.ModelSerializer):
-    """
-    Serializer for creating API keys
-    """
+class DonationCreateSerializer(serializers.ModelSerializer):
+    amount = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=1)
+    message = serializers.CharField(required=False, allow_blank=True)
+    donor_name = serializers.CharField(required=False, allow_blank=True)
+    donor_email = serializers.EmailField(required=False, allow_blank=True)
+    is_anonymous = serializers.BooleanField(default=False)
 
     class Meta:
-        model = APIKey
-        fields = ["name", "daily_limit", "expires_at", "can_use_deepfake_detection", "can_use_ai_text_detection", "can_use_ai_media_detection"]
+        model = Donation
+        fields = ["amount", "currency", "donor_name", "donor_email", "is_anonymous", "message"]
+
+    def validate(self, data):
+        # If anonymous but no donor information, raise an error
+        if data.get("is_anonymous") and not self.context.get("request").user.is_authenticated:
+            if not data.get("donor_name") and not data.get("donor_email"):
+                raise serializers.ValidationError("Anonymous donations must provide either a name or email.")
+        return data

@@ -4,6 +4,8 @@ from datetime import datetime, timedelta
 import os
 import uuid
 import time
+import urllib.parse
+import csv
 
 from django.conf import settings
 from django.shortcuts import render, redirect, get_object_or_404
@@ -12,16 +14,16 @@ from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.models import User, Group
 from django.contrib import messages
 from django.utils import timezone
-from django.http import JsonResponse, HttpResponseRedirect
+from django.http import JsonResponse, HttpResponse, HttpResponseRedirect
 from django.urls import reverse
 from django.db.models import Count, Q, Sum
 from django.core.paginator import Paginator
-from django.views.decorators.http import require_POST
 
 from api.models import (
     ForumThread,
     ForumReply,
     ForumTopic,
+    ForumTag,
     PublicDeepfakeArchive,
 )
 from app.models import UserData, ModeratorAction
@@ -43,9 +45,20 @@ def is_admin(user):
 
 
 def custom_admin_required(view_func):
-    """Decorator for views that checks if the user is admin, redirecting to login if not."""
-    decorated_view = login_required(user_passes_test(is_admin, login_url="custom_admin_login")(view_func))
-    return decorated_view
+    """Decorator for views that checks if the user is admin"""
+
+    def wrapper(request, *args, **kwargs):
+        if not request.user.is_authenticated:
+            messages.info(request, "Please log in to access the admin panel.")
+            return redirect("custom_admin_login")
+
+        if not is_admin(request.user):
+            messages.error(request, "You do not have admin privileges to access this page.")
+            return redirect("home")  # Redirect to home instead of login to avoid loop
+
+        return view_func(request, *args, **kwargs)
+
+    return wrapper
 
 
 # Login / Logout Views
@@ -353,25 +366,166 @@ def custom_admin_user_add_view(request):
 @custom_admin_required
 def custom_admin_pda_list_view(request):
     """View to list PDA submissions"""
-    # Get filter parameter
+
+    # Handle POST requests for bulk actions
+    if request.method == "POST":
+        action = request.POST.get("action")
+        selected_ids = request.POST.getlist("selected_ids")
+
+        if selected_ids:
+            if action == "bulk_approve":
+                # Bulk approve submissions
+                count = 0
+                for submission_id in selected_ids:
+                    try:
+                        submission = PublicDeepfakeArchive.objects.get(id=submission_id)
+                        submission.is_approved = True
+                        submission.review_date = timezone.now()
+                        submission.reviewed_by = request.user
+                        submission.save()
+
+                        # Log the action
+                        moderator_action = ModeratorAction(
+                            moderator=request.user, action_type="approve", content_type="pda", content_identifier=f"PDA: {submission.title}", notes="Bulk approval"
+                        )
+                        moderator_action.save()
+                        count += 1
+                    except PublicDeepfakeArchive.DoesNotExist:
+                        pass
+
+                if count == 1:
+                    messages.success(request, "1 submission was successfully approved.")
+                else:
+                    messages.success(request, f"{count} submissions were successfully approved.")
+                return redirect("custom_admin_pda_list")
+
+            elif action == "bulk_reject":
+                # Bulk reject submissions
+                count = 0
+                rejection_reason = request.POST.get("rejection_reason", "")
+
+                for submission_id in selected_ids:
+                    try:
+                        submission = PublicDeepfakeArchive.objects.get(id=submission_id)
+                        submission.is_approved = False
+                        submission.review_date = timezone.now()
+                        submission.reviewed_by = request.user
+                        submission.review_notes = rejection_reason
+                        submission.save()
+
+                        # Log the action
+                        moderator_action = ModeratorAction(
+                            moderator=request.user,
+                            action_type="reject",
+                            content_type="pda",
+                            content_identifier=f"PDA: {submission.title}",
+                            notes=f"Bulk rejection: {rejection_reason}",
+                        )
+                        moderator_action.save()
+                        count += 1
+                    except PublicDeepfakeArchive.DoesNotExist:
+                        pass
+
+                if count == 1:
+                    messages.success(request, "1 submission was successfully rejected.")
+                else:
+                    messages.success(request, f"{count} submissions were successfully rejected.")
+                return redirect("custom_admin_pda_list")
+
+    # GET request processing
+    # Get filter parameters
     filter_type = request.GET.get("filter", "all")
-
-    # Apply filter
-    if filter_type == "pending":
-        submissions = PublicDeepfakeArchive.objects.filter(is_approved=False, review_date__isnull=True).order_by("-submission_date")
-    elif filter_type == "approved":
-        submissions = PublicDeepfakeArchive.objects.filter(is_approved=True).order_by("-submission_date")
-    elif filter_type == "rejected":
-        submissions = PublicDeepfakeArchive.objects.filter(is_approved=False, review_date__isnull=False).order_by("-submission_date")
-    else:
-        submissions = PublicDeepfakeArchive.objects.all().order_by("-submission_date")
-
-    # Search functionality
+    media_type = request.GET.get("media_type", "")
     search_query = request.GET.get("search", "")
+    date_from = request.GET.get("date_from", "")
+    date_to = request.GET.get("date_to", "")
+
+    # Start with base queryset - add select_related to optimize and prevent duplicates
+    submissions = PublicDeepfakeArchive.objects.select_related("user__user", "detection_result", "reviewed_by").all()
+
+    # Apply status filter
+    if filter_type == "pending":
+        submissions = submissions.filter(is_approved=False, review_date__isnull=True)
+    elif filter_type == "approved":
+        submissions = submissions.filter(is_approved=True)
+    elif filter_type == "rejected":
+        submissions = submissions.filter(is_approved=False, review_date__isnull=False)
+
+    # Apply media type filter
+    if media_type:
+        submissions = submissions.filter(file_type=media_type)
+
+    # Apply date filters
+    if date_from:
+        try:
+            date_from_obj = datetime.strptime(date_from, "%Y-%m-%d").date()
+            submissions = submissions.filter(submission_date__date__gte=date_from_obj)
+        except ValueError:
+            pass
+
+    if date_to:
+        try:
+            date_to_obj = datetime.strptime(date_to, "%Y-%m-%d").date()
+            date_to_obj = datetime.combine(date_to_obj, datetime.max.time())
+            submissions = submissions.filter(submission_date__lte=date_to_obj)
+        except ValueError:
+            pass
+
+    # Apply search query
     if search_query:
         submissions = submissions.filter(
             Q(title__icontains=search_query) | Q(description__icontains=search_query) | Q(user__user__username__icontains=search_query)
         )
+
+    # Export to CSV if requested
+    if request.GET.get("export") == "csv":
+        response = HttpResponse(content_type="text/csv")
+        response["Content-Disposition"] = 'attachment; filename="pda_submissions.csv"'
+
+        writer = csv.writer(response)
+        writer.writerow(["ID", "Title", "Submitter", "File Type", "Submission Date", "Status", "Deepfake Status"])
+
+        for submission in submissions:
+            status = "Pending"
+            if submission.review_date:
+                status = "Approved" if submission.is_approved else "Rejected"
+
+            deepfake_status = "Unknown"
+            if submission.detection_result:
+                deepfake_status = "Deepfake" if submission.detection_result.is_deepfake else "Real"
+
+            writer.writerow(
+                [
+                    submission.id,
+                    submission.title,
+                    submission.user.user.username if submission.user and submission.user.user else "Unknown",
+                    submission.file_type,
+                    submission.submission_date.strftime("%Y-%m-%d %H:%M:%S"),
+                    status,
+                    deepfake_status,
+                ]
+            )
+
+        return response
+
+    # Apply ordering
+    submissions = submissions.order_by("-submission_date")
+
+    # Create query string for pagination links
+    query_string = ""
+    query_params = []
+    if filter_type != "all":
+        query_params.append(f"filter={filter_type}")
+    if media_type:
+        query_params.append(f"media_type={media_type}")
+    if search_query:
+        query_params.append(f"search={urllib.parse.quote(search_query)}")
+    if date_from:
+        query_params.append(f"date_from={date_from}")
+    if date_to:
+        query_params.append(f"date_to={date_to}")
+    if query_params:
+        query_string = "&".join(query_params)
 
     # Pagination
     paginator = Paginator(submissions, 10)  # 10 submissions per page
@@ -380,16 +534,20 @@ def custom_admin_pda_list_view(request):
 
     context = {
         "active_page": "pda_submissions",
-        "pda_submissions": page_obj,  # Changed from 'submissions' to 'pda_submissions'
+        "pda_submissions": page_obj,
         "filter_type": filter_type,
+        "media_type": media_type,
         "search_query": search_query,
+        "date_from": date_from,
+        "date_to": date_to,
+        "query_string": query_string,
         "pending_count": PublicDeepfakeArchive.objects.filter(is_approved=False, review_date__isnull=True).count(),
         "approved_count": PublicDeepfakeArchive.objects.filter(is_approved=True).count(),
         "rejected_count": PublicDeepfakeArchive.objects.filter(is_approved=False, review_date__isnull=False).count(),
         "total_count": PublicDeepfakeArchive.objects.count(),
         "page_range": range(1, paginator.num_pages + 1),
-        "is_paginated": paginator.count > 0,  # Added this to control pagination display
-        "paginator": paginator,  # Make sure paginator is also in the context
+        "is_paginated": paginator.count > 10,  # Only show pagination if more than 10 items
+        "paginator": paginator,
     }
 
     return render(request, "custom_admin/pda_list.html", context)
@@ -398,7 +556,7 @@ def custom_admin_pda_list_view(request):
 @custom_admin_required
 def custom_admin_pda_detail_view(request, pda_id):
     """View to see PDA submission details"""
-    submission = get_object_or_404(PublicDeepfakeArchive, id=pda_id)
+    submission = get_object_or_404(PublicDeepfakeArchive.objects.select_related("user__user", "detection_result", "reviewed_by"), id=pda_id)
 
     context = {
         "active_page": "pda_submissions",
@@ -784,8 +942,12 @@ def custom_admin_profile_view(request):
 @custom_admin_required
 def custom_admin_moderators_view(request):
     """View to manage moderators"""
+    # Get or create the moderator group
+    moderator_group, created = Group.objects.get_or_create(name="PDA_Moderator")
+    if created:
+        logger.info("Created new PDA_Moderator group")
+
     # Get users with moderator privileges
-    moderator_group = Group.objects.get(name="PDA_Moderator")
     moderators = User.objects.filter(Q(groups=moderator_group) | Q(is_staff=True)).distinct().order_by("username")
 
     # Handle form submissions
@@ -939,10 +1101,14 @@ def custom_admin_knowledge_base_create_view(request):
             attachments = []
             for file_name in request.FILES:
                 if file_name != "banner_image_file":  # Skip banner image if it was uploaded as a file
-                    attachments.append(request.FILES[file_name])
-
-            # Use admin user as author
-            author_id = request.user.userdata.id
+                    attachments.append(request.FILES[file_name])  # Use admin user as author - create UserData if it doesn't exist
+            try:
+                user_data = request.user.userdata
+                author_id = user_data.id
+            except UserData.DoesNotExist:
+                # Create UserData for admin user if it doesn't exist
+                user_data = UserData.objects.create(user=request.user)
+                author_id = user_data.id
 
             # Create article
             result = kb_controller.create_article(
@@ -1164,6 +1330,149 @@ def custom_admin_knowledge_base_topics_view(request):
         return redirect("custom_admin_knowledge_base_list")
 
 
+@login_required
+def custom_admin_forum_topics_view(request):
+    """View for managing forum topics"""
+    # Check if user is admin (superuser or staff)
+    if not (request.user.is_superuser or request.user.is_staff):
+        messages.error(request, "Admin privileges required to access this page.")
+        return redirect("custom_admin_login")
+
+    try:
+        # Handle topic creation
+        if request.method == "POST":
+            if "create" in request.POST:
+                name = request.POST.get("name")
+                description = request.POST.get("description", "")
+                icon = request.POST.get("icon", "")
+
+                if name:
+                    # Create topic
+                    topic = ForumTopic.objects.create(name=name, description=description, icon=icon)
+                    messages.success(request, f"Forum topic '{name}' created successfully")
+                else:
+                    messages.error(request, "Topic name is required")
+
+            # Handle topic update
+            elif "update" in request.POST:
+                topic_id = request.POST.get("topic_id")
+                name = request.POST.get("name")
+                description = request.POST.get("description", "")
+                icon = request.POST.get("icon", "")
+                is_active = request.POST.get("is_active") == "on"
+
+                if topic_id and name:
+                    topic = ForumTopic.objects.get(id=topic_id)
+                    topic.name = name
+                    topic.description = description
+                    topic.icon = icon
+                    topic.is_active = is_active
+                    topic.save()
+                    messages.success(request, f"Forum topic '{name}' updated successfully")
+                else:
+                    messages.error(request, "Topic ID and name are required")
+
+            # Handle topic deletion
+            elif "delete" in request.POST:
+                topic_id = request.POST.get("topic_id")
+
+                if topic_id:
+                    topic = ForumTopic.objects.get(id=topic_id)
+                    # Check if topic has threads
+                    if ForumThread.objects.filter(topic=topic).exists():
+                        topic.is_active = False
+                        topic.save()
+                        messages.warning(request, f"Topic '{topic.name}' has threads. Marked as inactive instead of deleting.")
+                    else:
+                        topic_name = topic.name
+                        topic.delete()
+                        messages.success(request, f"Forum topic '{topic_name}' deleted successfully")
+                else:
+                    messages.error(request, "Topic ID is required for deletion")
+
+        # Get all topics with thread counts
+        topics = ForumTopic.objects.all()
+        topics = topics.annotate(thread_count=Count("threads", filter=Q(threads__is_deleted=False)))
+
+        context = {"active_page": "forum", "topics": topics, "title": "Manage Forum Topics", "section": "forum"}
+
+        return render(request, "custom_admin/forum_topics.html", context)
+
+    except Exception as e:
+        logger.error(f"Error in forum topics admin view: {str(e)}")
+        messages.error(request, f"Error managing forum topics: {str(e)}")
+        return redirect("custom_admin_forum")
+
+
+@login_required
+def custom_admin_forum_tags_view(request):
+    """View for managing forum tags"""
+    # Check if user is admin (superuser or staff)
+    if not (request.user.is_superuser or request.user.is_staff):
+        messages.error(request, "Admin privileges required to access this page.")
+        return redirect("custom_admin_login")
+
+    try:
+        # Handle tag creation
+        if request.method == "POST":
+            if "create" in request.POST:
+                name = request.POST.get("name")
+                color = request.POST.get("color", "")
+
+                if name:
+                    # Create tag
+                    tag = ForumTag.objects.create(name=name, color=color)
+                    messages.success(request, f"Forum tag '{name}' created successfully")
+                else:
+                    messages.error(request, "Tag name is required")
+
+            # Handle tag update
+            elif "update" in request.POST:
+                tag_id = request.POST.get("tag_id")
+                name = request.POST.get("name")
+                color = request.POST.get("color", "")
+
+                if tag_id and name:
+                    tag = ForumTag.objects.get(id=tag_id)
+                    tag.name = name
+                    tag.color = color
+                    tag.save()
+                    messages.success(request, f"Forum tag '{name}' updated successfully")
+                else:
+                    messages.error(request, "Tag ID and name are required")
+
+            # Handle tag deletion
+            elif "delete" in request.POST:
+                tag_id = request.POST.get("tag_id")
+
+                if tag_id:
+                    tag = ForumTag.objects.get(id=tag_id)
+                    # Check if tag is used in threads
+                    if tag.threads.exists():
+                        messages.warning(request, f"Tag '{tag.name}' is used in threads. Removing tag from all threads before deletion.")
+                        # Remove the tag from all threads (M2M relationship)
+                        tag.threads.clear()
+
+                    tag_name = tag.name
+                    tag.delete()
+                    messages.success(request, f"Forum tag '{tag_name}' deleted successfully")
+                else:
+                    messages.error(request, "Tag ID is required for deletion")
+
+        # Get all tags with thread counts
+        tags = ForumTag.objects.all()
+        tags = tags.annotate(thread_count=Count("threads", filter=Q(threads__is_deleted=False)))
+
+        context = {"active_page": "forum", "tags": tags, "title": "Manage Forum Tags", "section": "forum"}
+
+        return render(request, "custom_admin/forum_tags.html", context)
+
+    except Exception as e:
+        logger.error(f"Error in forum tags admin view: {str(e)}")
+        messages.error(request, f"Error managing forum tags: {str(e)}")
+        return redirect("custom_admin_forum")
+
+
 def admin_upload_image(request):
     """
     Admin-only endpoint to upload images for knowledge base articles
@@ -1285,3 +1594,35 @@ def custom_admin_forum_delete_view(request, thread_id):
     }
 
     return render(request, "custom_admin/forum_delete_confirm.html", context)
+
+
+@custom_admin_required
+def custom_admin_pda_delete_view(request, pda_id):
+    """View to delete a PDA submission"""
+    submission = get_object_or_404(PublicDeepfakeArchive, id=pda_id)
+
+    if request.method == "POST":
+        submission_title = submission.title
+
+        # Log the action before deletion
+        moderator_action = ModeratorAction(
+            moderator=request.user,
+            action_type="delete",
+            content_type="pda",
+            content_identifier=f"PDA: {submission_title}",
+            notes=f"PDA submission '{submission_title}' was deleted by {request.user.username}",
+        )
+        moderator_action.save()
+
+        # Delete the submission
+        submission.delete()
+
+        messages.success(request, f"PDA submission '{submission_title}' has been deleted.")
+        return redirect("custom_admin_pda_list")
+
+    context = {
+        "active_page": "pda_submissions",
+        "submission": submission,
+    }
+
+    return render(request, "custom_admin/pda_delete_confirm.html", context)
